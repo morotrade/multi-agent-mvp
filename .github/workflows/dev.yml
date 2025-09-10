@@ -1,4 +1,8 @@
 ﻿name: AI Developer
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
 on:
   issues:
     types: [labeled]
