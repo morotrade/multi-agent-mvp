@@ -102,6 +102,8 @@ def create_pr(branch_name: str, issue_number: str, issue_title: str) -> dict:
     return response.json()
 
 def main():
+    global ISSUE_TITLE  # Dichiara global all'inizio della funzione
+    
     try:
         print("🧑‍💻 Avvio AI Developer...")
 
@@ -127,7 +129,6 @@ def main():
             print(f"⚠️ LLM output non valido ({e}), uso fallback LICENSE...")
             diff_content = create_fallback_diff()
             # Nota nel commit che è un fallback
-            global ISSUE_TITLE
             ISSUE_TITLE = f"{ISSUE_TITLE} (fallback: added LICENSE)"
 
         # Applica il diff
