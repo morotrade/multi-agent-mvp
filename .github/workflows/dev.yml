@@ -38,8 +38,9 @@ jobs:
         run: |
           git config user.name "ai-dev-bot"
           git config user.email "ai-dev-bot@users.noreply.github.com"
-          git config credential.helper store
-          echo "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com" > ~/.git-credentials
+          # forza il remote a usare il GITHUB_TOKEN per il push
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          git remote -v
 
       - name: Install dependencies
         run: pip install httpx openai anthropic google-generativeai
