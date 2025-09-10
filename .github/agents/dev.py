@@ -78,8 +78,37 @@ def generate_implementation(issue_details: dict) -> str:
     model = get_preferred_model("developer")
     return call_llm_api(prompt, model=model, max_tokens=6000)
 
+def safe_git_push(branch_name: str) -> bool:
+    """Push del branch con gestione degli errori"""
+    try:
+        # Debug: verifica configurazione git
+        result = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True)
+        print(f"🔍 Git remotes: {result.stdout}")
+        
+        # Debug: verifica branch
+        result = subprocess.run(["git", "branch", "-a"], capture_output=True, text=True)
+        print(f"🔍 Git branches: {result.stdout}")
+        
+        # Prova il push
+        result = subprocess.run(
+            ["git", "push", "origin", branch_name], 
+            capture_output=True, text=True, check=False
+        )
+        
+        if result.returncode == 0:
+            print(f"✅ Push riuscito: {branch_name}")
+            return True
+        else:
+            print(f"❌ Push fallito. STDOUT: {result.stdout}")
+            print(f"❌ Push fallito. STDERR: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Errore durante push: {e}")
+        return False
+
 def create_pr(branch_name: str, issue_number: str, issue_title: str) -> dict:
-    """Crea una Pull Request"""
+    """Crea una Pull Request - con gestione graceful del 403"""
     pr_data = {
         "title": f"[Bot] Implement: {issue_title}",
         "head": branch_name,
@@ -97,6 +126,13 @@ def create_pr(branch_name: str, issue_number: str, issue_title: str) -> dict:
 
     with httpx.Client(timeout=30) as client:
         response = client.post(url, headers=get_github_headers(), json=pr_data)
+        
+        if response.status_code == 403:
+            print("⚠️ Permessi insufficienti per creare PR automaticamente")
+            print(f"🔗 Branch creato: {branch_name}")
+            print(f"💡 Crea manualmente la PR da GitHub web interface")
+            return {"html_url": f"https://github.com/{REPO}/compare/{branch_name}"}
+        
         response.raise_for_status()
 
     return response.json()
@@ -146,12 +182,17 @@ def main():
         ], check=True, capture_output=True)
 
         print("📤 Push del branch...")
-        subprocess.run(["git", "push", "origin", branch_name], check=True, capture_output=True)
+        push_success = safe_git_push(branch_name)
+        
+        if not push_success:
+            print("⚠️ Push fallito, ma branch e commit locali creati")
+            print(f"🔗 Controlla manualmente: https://github.com/{REPO}")
+            return
 
-        # Crea PR
+        # Crea PR (con gestione graceful del 403)
         print("🚀 Creazione della Pull Request...")
         pr = create_pr(branch_name, ISSUE_NUMBER, ISSUE_TITLE)
-        print(f"✅ PR creata: {pr['html_url']}")
+        print(f"✅ Risultato: {pr['html_url']}")
 
         # Torna al branch main
         subprocess.run(["git", "checkout", "main"], capture_output=True)
