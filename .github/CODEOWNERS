@@ -1,0 +1,7 @@
+﻿# Proprietari del codice per tutto il repository
+*       @morotrade
+
+# File di configurazione AI - solo umani
+.github/agents/**     @morotrade
+.github/workflows/**  @morotrade
+.github/prompts/**    @morotrade
