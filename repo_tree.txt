@@ -1,0 +1,22 @@
+Numero di serie del volume: 3498-67F8
+C:.
+│   .gitattributes
+│   README.md
+│
+└───.github
+    │   CODEOWNERS
+    │
+    ├───agents
+    │       dev.py
+    │       reviewer.py
+    │       utils.py
+    │
+    ├───prompts
+    │       dev.md
+    │       reviewer.md
+    │
+    └───workflows
+            dev.yml
+            reviewer.yml
+
+(base) PS C:\Users\loren\MultiAgentRepo>
