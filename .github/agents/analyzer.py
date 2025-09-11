@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 import os, json, re
 import httpx
-from utils import get_github_headers, call_llm_api, get_preferred_model
+from utils import (
+    get_github_headers, post_issue_comment, create_issue, add_labels,
+    get_issue_node_id, add_item_to_project, set_project_single_select,
+    call_llm_api, get_preferred_model
+)
 
-REPO = os.environ.get("REPO") or os.environ["GITHUB_REPOSITORY"]
-OWNER, NAME = REPO.split("/")
-ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
-ISSUE_TITLE  = os.environ.get("ISSUE_TITLE", "")
-ISSUE_BODY   = os.environ.get("ISSUE_BODY", "")
+REPO = os.environ["GITHUB_REPOSITORY"]
+ISSUE_NUMBER = int(os.environ["ISSUE_NUMBER"])
 
-GITHUB_PROJECT_ID = os.environ.get("GITHUB_PROJECT_ID")  # Projects v2 (opzionale)
-PROJECT_STATUS_FIELD_ID = os.environ.get("PROJECT_STATUS_FIELD_ID")  # opzionale
-PROJECT_STATUS_BACKLOG_OPTION_ID = os.environ.get("PROJECT_STATUS_BACKLOG_OPTION_ID")  # opzionale
+OWNER, REPO_NAME = REPO.split("/")
 
-def log(msg: str):
-    print(msg, flush=True)
+PROJECT_ID = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
+STATUS_FIELD_ID = os.environ.get("PROJECT_STATUS_FIELD_ID")
+STATUS_BACKLOG_ID = os.environ.get("PROJECT_STATUS_BACKLOG_ID")
+STATUS_INPROGRESS_ID = os.environ.get("PROJECT_STATUS_INPROGRESS_ID")
+
+def get_issue() -> dict:
+    url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}"
+    with httpx.Client(timeout=30) as client:
+        r = client.get(url, headers=get_github_headers())
+        r.raise_for_status()
+        return r.json()
 
 def load_prompt() -> str:
     path = ".github/prompts/analyzer.md"
@@ -22,176 +30,108 @@ def load_prompt() -> str:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return "# Analyzer\nProduce a JSON plan as specified."
+        return """# Role: Senior Tech Project Planner (Analyzer)
+You analyze the parent Issue and produce a modular plan split into sprints and tasks.
+Return ONLY one fenced JSON with fields: policy, sprints[], tasks[]."""
 
-def post_issue_comment(issue_number: str, body: str):
-    url = f"https://api.github.com/repos/{REPO}/issues/{issue_number}/comments"
-    r = httpx.post(url, headers=get_github_headers(), json={"body": body}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def create_issue(title: str, body: str, labels=None):
-    url = f"https://api.github.com/repos/{REPO}/issues"
-    data = {"title": title, "body": body}
-    if labels:
-        data["labels"] = labels
-    r = httpx.post(url, headers=get_github_headers(), json=data, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def add_issue_to_project(issue_node_id: str):
-    if not GITHUB_PROJECT_ID:
-        return None
-    url = "https://api.github.com/graphql"
-    query = """
-      mutation($project:ID!, $issue:ID!) {
-        addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
-          item { id }
-        }
-      }
-    """
-    variables = {"project": GITHUB_PROJECT_ID, "issue": issue_node_id}
-    r = httpx.post(url, headers={
-        "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-        "Content-Type": "application/json"
-    }, json={"query": query, "variables": variables}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def set_project_status(item_id: str, status_field_id: str, option_id: str):
-    # Setta la colonna (Status) su "Backlog" se hai gli ID
-    url = "https://api.github.com/graphql"
-    query = """
-      mutation($project:ID!, $item:ID!, $field:ID!, $option: String!) {
-        updateProjectV2ItemFieldValue(input:{
-          projectId: $project,
-          itemId: $item,
-          fieldId: $field,
-          value: { singleSelectOptionId: $option }
-        }) { clientMutationId }
-      }
-    """
-    variables = {
-        "project": GITHUB_PROJECT_ID,
-        "item": item_id,
-        "field": status_field_id,
-        "option": option_id
-    }
-    r = httpx.post(url, headers={
-        "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-        "Content-Type": "application/json"
-    }, json={"query": query, "variables": variables}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def ensure_backlog(project_add_resp):
+def parse_llm_json(text: str) -> dict:
+    m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
+    if not m:
+        # tenta raw json
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except Exception as e:
+            raise Exception(f"Analyzer: JSON non trovato/valido ({e}).")
     try:
-        if PROJECT_STATUS_FIELD_ID and PROJECT_STATUS_BACKLOG_OPTION_ID and project_add_resp:
-            item_id = project_add_resp["data"]["addProjectV2ItemById"]["item"]["id"]
-            set_project_status(item_id, PROJECT_STATUS_FIELD_ID, PROJECT_STATUS_BACKLOG_OPTION_ID)
+        return json.loads(m.group(1))
     except Exception as e:
-        log(f"⚠️ Impossibile impostare Status=Backlog: {e}")
+        raise Exception(f"Analyzer: JSON non valido ({e}).")
+
+def add_to_project_if_available(issue_number: int, status_option_id: str = None):
+    if not (PROJECT_ID and STATUS_FIELD_ID):
+        return
+    try:
+        node_id = get_issue_node_id(OWNER, REPO_NAME, issue_number)
+        item_id = add_item_to_project(PROJECT_ID, node_id)
+        if status_option_id:
+            set_project_single_select(PROJECT_ID, item_id, STATUS_FIELD_ID, status_option_id)
+    except Exception as e:
+        post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"⚠️ Project linkage error for #{issue_number}: `{e}`")
 
 def main():
-    log(f"🧭 Analyzer started on issue #{ISSUE_NUMBER} — {ISSUE_TITLE}")
-    post_issue_comment(ISSUE_NUMBER, f"🧭 **Analyzer avviato** su #{ISSUE_NUMBER}\n\n- Repo: `{REPO}`\n- Policy: default\n- Model: `{get_preferred_model('analyzer')}`")
+    issue = get_issue()
+    title = issue["title"]
+    body = issue.get("body") or ""
+    post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"🧭 Analyzer avviato su #{ISSUE_NUMBER}\n\nRepo: {REPO}\nPolicy: default\nModel: {get_preferred_model('analyzer')}")
 
-    # 1) Costruisci prompt
-    prompt = f"{load_prompt()}\n\n---\n# Parent Issue\nTitle: {ISSUE_TITLE}\n\nBody:\n{ISSUE_BODY}\n\nReturn ONLY one fenced JSON block as specified."
+    # Prompt
+    prompt = load_prompt()
+    prompt += f"\n\n# PARENT ISSUE\nTitle: {title}\nBody:\n{body}\n\n"
+    prompt += "Restituisci SOLO il JSON secondo lo schema indicato, senza testo extra."
+
+    # LLM
     model = get_preferred_model("analyzer")
-    plan_txt = call_llm_api(prompt, model=model, max_tokens=4000)
+    raw = call_llm_api(prompt, model=model, max_tokens=4000)
+    plan = parse_llm_json(raw)
 
-    # 2) Estrai il JSON dal fenced block
-    m = re.search(r"```json\s+([\s\S]+?)\s```", plan_txt)
-    if not m:
-        # tenta plain json
-        m2 = re.search(r"\{[\s\S]+\}\s*$", plan_txt.strip())
-        if not m2:
-            post_issue_comment(ISSUE_NUMBER, f"❌ Analyzer: nessun JSON valido trovato.\n\nOutput grezzo:\n```\n{plan_txt[:2000]}\n```")
-            raise SystemExit(1)
-        json_str = m2.group(0)
-    else:
-        json_str = m.group(1)
+    policy = (plan.get("policy") or "essential-only").strip()
+    sprints = plan.get("sprints") or []
+    tasks = plan.get("tasks") or []
 
-    try:
-        plan = json.loads(json_str)
-    except Exception as e:
-        post_issue_comment(ISSUE_NUMBER, f"❌ Analyzer: JSON non valido.\n\nErrore: `{e}`\n\nEstratto:\n```\n{json_str[:2000]}\n```")
-        raise
+    post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"📦 Piano generato (policy: {policy})\n\nSprints: {len(sprints)}\nTasks: {len(tasks)}")
 
-    policy = plan.get("policy", "essential-only")
-    sprints = plan.get("sprints", [])
-    tasks   = plan.get("tasks", [])
+    # Crea sprint issue (opzionale, prendiamo il primo)
+    sprint_issue_num = None
+    if sprints:
+        s0 = sprints[0]
+        s_title = f"[Sprint] {s0.get('name','Sprint 1')}"
+        s_body = f"Goal: {s0.get('goal','')}\nDuration: {s0.get('duration','')}\n\nParent: #{ISSUE_NUMBER}"
+        sprint = create_issue(OWNER, REPO_NAME, s_title, s_body, labels=["sprint"])
+        sprint_issue_num = sprint["number"]
+        post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"🗂️ Creato sprint: #{sprint_issue_num} — {s_title}")
+        # project: set Backlog di default
+        add_to_project_if_available(sprint_issue_num, STATUS_BACKLOG_ID)
 
-    post_issue_comment(ISSUE_NUMBER, f"📦 **Piano generato** (policy: `{policy}`)\n\n- Sprints: {len(sprints)}\n- Tasks: {len(tasks)}")
+    # Crea tasks
+    created = []
+    for i, t in enumerate(tasks, 1):
+        t_title = t.get("title") or f"Task {i}"
+        t_body = [
+            f"Parent: #{ISSUE_NUMBER}",
+        ]
+        if sprint_issue_num:
+            t_body.append(f"Sprint: #{sprint_issue_num}")
+        if t.get("description"):
+            t_body.append(f"\n{t['description']}\n")
+        if t.get("paths"):
+            t_body.append(f"Paths: {', '.join(t['paths'])}")
+        if t.get("acceptance"):
+            t_body.append("\n**Acceptance**:\n- " + "\n- ".join(t["acceptance"]))
+        if t.get("depends_on"):
+            t_body.append("\nDepends on: " + ", ".join(str(x) for x in t["depends_on"]))
 
-    # 3) Crea issue Sprint (se presenti)
-    sprint_map = {}  # name -> issue number
-    for sp in sprints:
-        stitle = f"[Sprint] {sp.get('name','Sprint')}"
-        sbody = f"**Goal:** {sp.get('goal','')}\n**Duration:** {sp.get('duration','')}\n\nParent: #{ISSUE_NUMBER}"
-        sprint_issue = create_issue(stitle, sbody, labels=["sprint"])
-        sprint_map[sp.get("name","Sprint")] = sprint_issue["number"]
-        post_issue_comment(ISSUE_NUMBER, f"🗂️ Creato sprint: #{sprint_issue['number']} — {stitle}")
+        labels = list(set((t.get("labels") or []) + ["task"]))
+        issue_task = create_issue(OWNER, REPO_NAME, t_title, "\n".join(t_body), labels=labels)
+        task_num = issue_task["number"]
+        created.append(task_num)
 
-        # add to project backlog
-        if GITHUB_PROJECT_ID and sprint_issue.get("node_id"):
-            resp = add_issue_to_project(sprint_issue["node_id"])
-            ensure_backlog(resp)
+        # Aggiungi al Project e metti Backlog
+        add_to_project_if_available(task_num, STATUS_BACKLOG_ID)
 
-    # 4) Crea issue Task
-    for t in tasks:
-        ttitle = t["title"]
-        desc   = t.get("description","")
-        labels = t.get("labels", []) + ["task"]
-        sev    = t.get("severity","important")
-        est    = t.get("estimate","M")
-        sprint_name = t.get("sprint")
-        paths  = t.get("paths", [])
-        depends_on = t.get("depends_on", [])
-        acceptance = t.get("acceptance", [])
-        tpolicy = t.get("policy", policy)
+        post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"🧩 Creato task: #{task_num} — {t_title}")
 
-        links = []
-        if sprint_name and sprint_name in sprint_map:
-            links.append(f"**Sprint:** #{sprint_map[sprint_name]}")
-        if depends_on:
-            links.append("**Depends on:** " + ", ".join(depends_on))
+    # Auto-start del PRIMO task con bot:implement (pipeline automatizzata)
+    if created:
+        try:
+            add_labels(OWNER, REPO_NAME, created[0], ["bot:implement"])
+        except Exception as e:
+            post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, f"⚠️ Impossibile etichettare il primo task #{created[0]} con bot:implement: `{e}`")
 
-        body = f"""**What & why**
-{desc}
-
-**Policy:** `{tpolicy}`
-**Severity:** `{sev}` — **Estimate:** `{est}`
-
-**Paths (indicative):**
-{os.linesep.join(paths)}
-
-ruby
-Copia codice
-
-**Acceptance:**
-- {os.linesep.join(acceptance)}
-
-**Parent:** #{ISSUE_NUMBER}
-{os.linesep.join(links)}
-"""
-        task_issue = create_issue(ttitle, body, labels=labels)
-        post_issue_comment(ISSUE_NUMBER, f"🧩 Creato task: #{task_issue['number']} — {ttitle}")
-
-        # add to project backlog
-        if GITHUB_PROJECT_ID and task_issue.get("node_id"):
-            resp = add_issue_to_project(task_issue["node_id"])
-            ensure_backlog(resp)
-
-    # 5) Commento riassuntivo + hint su Dev
-    post_issue_comment(ISSUE_NUMBER,
-        "✅ **Analyzer completato**\n\n"
-        f"- Policy: `{policy}`\n"
-        f"- Sprint creati: {len(sprints)}\n"
-        f"- Task creati: {len(tasks)}\n\n"
-        "Per avviare l’implementazione automatica di un task, aggiungi label `bot:implement` alla relativa Issue.\n"
-        "Il Reviewer partirà automaticamente sulle PR tramite `AI Code Reviewer`."
+    post_issue_comment(
+        OWNER, REPO_NAME, ISSUE_NUMBER,
+        f"✅ Analyzer completato\n\nPolicy: {policy}\nSprint creati: {1 if sprint_issue_num else 0}\nTask creati: {len(created)}\n\n"
+        f"Per avviare l’implementazione automatica di un task, aggiungi label `bot:implement` (il primo è già etichettato)."
     )
 
 if __name__ == "__main__":

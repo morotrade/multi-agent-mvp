@@ -1,71 +1,11 @@
-﻿import os, re, fnmatch, subprocess
-from typing import List
+﻿import os, re, fnmatch, subprocess, json
+from typing import List, Optional, Dict
 
 import httpx
-import json
 
-# --- Project V2 helpers (GraphQL) --------------------------------------------
-GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
-
-def _gh_graphql(query: str, variables: dict) -> dict:
-    """Minimal GraphQL client using httpx. Uses GH token from env (GH_CLASSIC_TOKEN or GITHUB_TOKEN)."""
-    token = os.environ.get("GH_CLASSIC_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise RuntimeError("Missing GH_CLASSIC_TOKEN or GITHUB_TOKEN in env for GraphQL")
-
-    headers = {
-        "Authorization": f"bearer {token}",
-        "Accept": "application/vnd.github+json",
-    }
-    with httpx.Client(timeout=30) as client:
-        r = client.post(GITHUB_GRAPHQL_URL, headers=headers, json={"query": query, "variables": variables})
-        r.raise_for_status()
-    data = r.json()
-    if "errors" in data and data["errors"]:
-        raise RuntimeError(f"GraphQL error: {data['errors']}")
-    return data["data"]
-
-def get_issue_node_id(owner: str, repo: str, number: int) -> str:
-    q = """
-    query($owner:String!, $name:String!, $number:Int!){
-      repository(owner:$owner, name:$name){
-        issue(number:$number){ id }
-      }
-    }"""
-    d = _gh_graphql(q, {"owner": owner, "name": repo, "number": number})
-    node = d["repository"]["issue"]
-    if not node:
-        raise RuntimeError(f"Issue #{number} not found")
-    return node["id"]
-
-def add_item_to_project(project_id: str, content_id: str) -> str:
-    """Adds an Issue/PR node to a Project V2. Returns the project item id."""
-    m = """
-    mutation($projectId:ID!, $contentId:ID!){
-      addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}){
-        item { id }
-      }
-    }"""
-    d = _gh_graphql(m, {"projectId": project_id, "contentId": content_id})
-    return d["addProjectV2ItemById"]["item"]["id"]
-
-def set_project_single_select(project_id: str, item_id: str, field_id: str, option_id: str) -> None:
-    """Sets a SingleSelect field value (e.g., Status) for a project item."""
-    m = """
-    mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
-      updateProjectV2ItemFieldValue(input:{
-        projectId:$projectId,
-        itemId:$itemId,
-        fieldId:$fieldId,
-        value:{ singleSelectOptionId:$optionId }
-      }){ projectV2Item { id } }
-    }"""
-    _gh_graphql(m, {
-        "projectId": project_id,
-        "itemId": item_id,
-        "fieldId": field_id,
-        "optionId": option_id
-    })
+# ===========
+# GitHub API
+# ===========
 
 def get_github_headers() -> dict:
     return {
@@ -74,8 +14,93 @@ def get_github_headers() -> dict:
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
+def get_github_graphql_headers() -> dict:
+    # per ProjectV2 con PAT classic se necessario
+    token = os.environ.get("GH_CLASSIC_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+
+def post_issue_comment(owner: str, repo: str, issue_number: int, body: str) -> None:
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/comments"
+    with httpx.Client(timeout=30) as client:
+        r = client.post(url, headers=get_github_headers(), json={"body": body})
+        r.raise_for_status()
+
+def create_issue(owner: str, repo: str, title: str, body: str, labels: Optional[List[str]]=None) -> Dict:
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+    payload = {"title": title, "body": body}
+    if labels:
+        payload["labels"] = labels
+    with httpx.Client(timeout=30) as client:
+        r = client.post(url, headers=get_github_headers(), json=payload)
+        r.raise_for_status()
+        return r.json()
+
+def add_labels(owner: str, repo: str, issue_number: int, labels: List[str]) -> None:
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}/labels"
+    with httpx.Client(timeout=30) as client:
+        r = client.post(url, headers=get_github_headers(), json={"labels": labels})
+        r.raise_for_status()
+
+def get_issue_node_id(owner: str, repo: str, issue_number: int) -> str:
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}"
+    with httpx.Client(timeout=30) as client:
+        r = client.get(url, headers=get_github_headers())
+        r.raise_for_status()
+        return r.json()["node_id"]
+
+def add_item_to_project(project_id: str, content_node_id: str) -> str:
+    """ProjectV2 add item (GraphQL) -> returns item id"""
+    query = """
+      mutation($projectId: ID!, $contentId: ID!){
+        addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+          item { id }
+        }
+      }
+    """
+    vars_ = {"projectId": project_id, "contentId": content_node_id}
+    with httpx.Client(timeout=40) as client:
+        r = client.post(
+            "https://api.github.com/graphql",
+            headers=get_github_graphql_headers(),
+            json={"query": query, "variables": vars_},
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["data"]["addProjectV2ItemById"]["item"]["id"]
+
+def set_project_single_select(project_id: str, item_id: str, field_id: str, option_id: str) -> None:
+    """Set ProjectV2 SingleSelect field (e.g. Status)"""
+    query = """
+      mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+        updateProjectV2ItemFieldValue(
+          input:{
+            projectId:$projectId,
+            itemId:$itemId,
+            fieldId:$fieldId,
+            value:{ singleSelectOptionId:$optionId }
+          }
+        ){
+          projectV2Item { id }
+        }
+      }
+    """
+    vars_ = {"projectId": project_id, "itemId": item_id, "fieldId": field_id, "optionId": option_id}
+    with httpx.Client(timeout=40) as client:
+        r = client.post(
+            "https://api.github.com/graphql",
+            headers=get_github_graphql_headers(),
+            json={"query": query, "variables": vars_},
+        )
+        r.raise_for_status()
+
+# ======================
+# LLM provider routing
+# ======================
+
 def call_llm_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 4000) -> str:
-    # Router semplice per provider
     if model.startswith(("claude", "anthropic")):
         return call_anthropic_api(prompt, model, max_tokens)
     if model.startswith("gemini"):
@@ -91,9 +116,9 @@ def call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 4
         client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
         )
         return resp.choices[0].message.content
     except Exception as e:
@@ -110,9 +135,8 @@ def call_anthropic_api(prompt: str, model: str = "claude-3-5-sonnet-latest", max
             model=model,
             max_tokens=max_tokens,
             temperature=0.1,
-            messages=[{"role":"user","content":prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
-        # Claude SDK restituisce una lista di content blocks
         return "".join(getattr(b, "text", str(b)) for b in resp.content)
     except Exception as e:
         return f"Errore Anthropic API: {e}"
@@ -134,13 +158,17 @@ def get_preferred_model(role: str) -> str:
     return {
         "reviewer": os.environ.get("REVIEWER_MODEL", "gpt-4o-mini"),
         "developer": os.environ.get("DEVELOPER_MODEL", "gpt-4o-mini"),
-        "project_manager": os.environ.get("PM_MODEL", "gpt-4o-mini"),
+        "analyzer": os.environ.get("ANALYZER_MODEL", "gpt-4o-mini"),
     }.get(role, "gpt-4o-mini")
+
+# ======================
+# Repo helpers & guards
+# ======================
 
 def slugify(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^a-z0-9]+","-", text).strip("-")
-    return text[:40]
+    return text[:60]
 
 def get_whitelist_patterns() -> List[str]:
     return [
@@ -166,11 +194,9 @@ def paths_from_unified_diff(diff: str) -> List[str]:
     return list(set(files))
 
 def is_path_allowed(path: str) -> bool:
-    import fnmatch
     return any(fnmatch.fnmatch(path, p) for p in get_whitelist_patterns())
 
 def is_path_denied(path: str) -> bool:
-    import fnmatch
     return any(fnmatch.fnmatch(path, p) for p in get_denylist_patterns())
 
 def validate_diff_files(diff_content: str) -> None:
