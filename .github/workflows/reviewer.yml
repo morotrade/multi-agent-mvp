@@ -1,4 +1,8 @@
 ﻿name: AI Code Reviewer
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
 on:
   pull_request:
     types: [opened, synchronize, reopened]

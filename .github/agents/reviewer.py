@@ -1,90 +1,151 @@
 ﻿#!/usr/bin/env python3
-import os
-import httpx
+import os, re, httpx
 from utils import get_github_headers, call_llm_api, get_preferred_model
 
 REPO = os.environ["GITHUB_REPOSITORY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
 
-def get_pr_diff() -> str:
-    """Recupera il diff della PR"""
+def gh_get(url, accept=None, timeout=60):
     headers = get_github_headers()
-    headers["Accept"] = "application/vnd.github.v3.diff"
+    if accept:
+        headers["Accept"] = accept
+    with httpx.Client(timeout=timeout) as client:
+        r = client.get(url, headers=headers)
+        r.raise_for_status()
+        return r
 
+def gh_post(url, json=None, timeout=60):
+    with httpx.Client(timeout=timeout) as client:
+        r = client.post(url, headers=get_github_headers(), json=json)
+        r.raise_for_status()
+        return r
+
+def get_pr_info():
     url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}"
+    return gh_get(url).json()
 
-    with httpx.Client(timeout=60) as client:
-        response = client.get(url, headers=headers)
-        response.raise_for_status()
+def get_pr_diff_text():
+    url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}"
+    return gh_get(url, accept="application/vnd.github.v3.diff").text
 
-    return response.text[:80000]
-
-def post_comment(body: str) -> None:
-    """Posta un commento sulla PR"""
+def post_comment(body: str):
     url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    data = {"body": body}
+    gh_post(url, json={"body": body})
 
-    with httpx.Client(timeout=30) as client:
-        response = client.post(url, headers=get_github_headers(), json=data)
-        response.raise_for_status()
+def create_issue(title: str, body: str, labels):
+    url = f"https://api.github.com/repos/{REPO}/issues"
+    gh_post(url, json={"title": title, "body": body, "labels": labels})
 
-def load_prompt(prompt_name: str) -> str:
-    """Carica il prompt dal file"""
-    prompt_path = f".github/prompts/{prompt_name}.md"
+def load_prompt(name: str) -> str:
+    path = f".github/prompts/{name}.md"
     try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return f.read()
     except FileNotFoundError:
-        return f"# Prompt per {prompt_name}\nAnalizza il codice seguendo le best practices."
+        return f"# Prompt {name}\nAnalizza il codice seguendo le best practices."
+
+def detect_policy(pr_json) -> str:
+    labels = [l["name"].lower() for l in pr_json.get("labels", [])]
+    if "policy:strict".lower() in labels:
+        return "strict"
+    if "policy:lenient".lower() in labels:
+        return "lenient"
+    return "essential-only"
+
+def extract_findings(analysis_text: str):
+    """Estrarre liste di bullet tra le intestazioni BLOCKER / IMPORTANT / SUGGESTION."""
+    def bullets_between(start_kw, end_kw=None):
+        patt = r"(?:^|\n)\s*"+start_kw+r".*?\n(?P<body>[\s\S]*?)" + (r"(?:\n\s*"+end_kw+r"\b|$)" if end_kw else r"$")
+        m = re.search(patt, analysis_text, flags=re.I)
+        if not m:
+            return []
+        lines = [ln.strip() for ln in m.group("body").splitlines()]
+        return [re.sub(r"^[-*\u2022]\s*", "", ln).strip() for ln in lines if ln.strip().startswith(("-", "*", "•"))]
+
+    blockers = bullets_between(r"(?:\*\*)?BLOCKER:?")
+    importants = bullets_between(r"(?:\*\*)?IMPORTANT:?", r"(?:\*\*)?SUGGESTION:?")
+    # Heuristics: se dice esplicitamente none/nessuno, azzera
+    if re.search(r"BLOCKER[^:\n]*:\s*(?:none|nessuno|n/a)", analysis_text, re.I):
+        blockers = []
+    if re.search(r"IMPORTANT[^:\n]*:\s*(?:none|nessuno|n/a)", analysis_text, re.I):
+        importants = []
+    return blockers, importants
+
+def should_fail(policy: str, blockers: list, importants: list) -> bool:
+    if policy == "lenient":
+        return False
+    if policy == "essential-only":
+        return len(blockers) > 0
+    if policy == "strict":
+        return (len(blockers) > 0) or (len(importants) > 0)
+    return False
 
 def main():
     try:
-        print("🤖 Avvio AI Code Reviewer...")
+        print("🔎 Reviewer: start")
+        pr = get_pr_info()
+        branch = pr["head"]["ref"]
+        pr_url = pr["html_url"]
+        policy = detect_policy(pr)
 
-        # Recupera il diff
-        diff = get_pr_diff()
-        if not diff or len(diff.strip()) < 100:
-            print("Nessun diff significativo da analizzare")
+        # Log iniziale visibile in PR
+        post_comment(f"🧭 **AI Reviewer avviato** su PR #{PR_NUMBER}\n\n- Branch: `{branch}`\n- Policy: `{policy}`\n- PR: {pr_url}")
+
+        diff_text = get_pr_diff_text()
+        if not diff_text or len(diff_text.strip()) < 50:
+            post_comment("ℹ️ Nessun diff significativo da analizzare.")
+            print("no-diff")
             return
 
-        # Carica il prompt
-        prompt_template = load_prompt("reviewer")
-
-        # Avvolgiamo il diff in un blocco ```diff per un parsing robusto
-        prompt = (
-            f"{prompt_template}\n\n"
-            f"## DIFF DA ANALIZZARE:\n\n"
-            f"```diff\n{diff}\n```\n\n"
-            f"## ANALISI:"
-        )
-
-        # Chiama l'AI
-        print("📊 Analisi del codice in corso...")
+        prompt = load_prompt("reviewer") + f"\n\n## DIFF DA ANALIZZARE:\n\n```diff\n{diff_text}\n```\n\n## ANALISI:"
         model = get_preferred_model("reviewer")
+        print("call LLM…")
         analysis = call_llm_api(prompt, model=model)
 
-        # Formatta il commento
-        comment = f"""## 🤖 AI Code Review
+        # Posta l’analisi completa
+        post_comment(f"## 🤖 AI Code Review\n\n{analysis}\n\n---\n*Revisione automatica*")
 
-{analysis}
+        # Estrai BLOCKER/IMPORTANT
+        blockers, importants = extract_findings(analysis)
+        print(f"found: blockers={len(blockers)} importants={len(importants)} policy={policy}")
 
----
-*Revisione automatica generata da GitHub Actions*"""
+        # Se serve, apri Issue di fix per il Dev
+        need_fix_issue = should_fail(policy, blockers, importants)
+        if need_fix_issue:
+            checklist = ""
+            if blockers:
+                checklist += "### BLOCKER\n" + "\n".join(f"- [ ] {b}" for b in blockers) + "\n"
+            if policy == "strict" and importants:
+                checklist += "### IMPORTANT\n" + "\n".join(f"- [ ] {i}" for i in importants) + "\n"
 
-        # Posta il commento
-        post_comment(comment)
-        print("✅ Revisione completata e commento postato")
+            body = (
+                f"Fix per **PR #{PR_NUMBER}** ({pr_url})\n\n"
+                f"**branch:** `{branch}`\n\n"
+                f"{checklist}\n"
+                f"---\n"
+                f"_Issue aperta automaticamente dal Reviewer. Etichetta: `bot:implement`_"
+            )
+            create_issue(
+                title=f"Fix findings from PR #{PR_NUMBER}",
+                body=body,
+                labels=["bot:implement"]
+            )
+            post_comment("📌 Creata Issue di fix con `bot:implement`. Il Dev Agent prenderà in carico le patch.")
+
+        # Fallisci o passa il job secondo policy
+        if need_fix_issue:
+            print("fail by policy")
+            raise SystemExit(1)
+        else:
+            print("pass by policy")
 
     except Exception as e:
-        error_msg = f"❌ Errore durante la revisione: {str(e)}"
-        print(error_msg)
-
-        # Posta un commento di errore solo se non è un errore di timeout
-        if "timeout" not in str(e).lower():
-            try:
-                post_comment(f"## ❌ Errore AI Reviewer\n\n{error_msg}")
-            except:
-                pass
+        print(f"error: {e}")
+        try:
+            post_comment(f"❌ **Errore Reviewer**\n\n{e}")
+        except:
+            pass
+        raise
 
 if __name__ == "__main__":
     main()
