@@ -30,3 +30,7 @@ essential-only (BLOCKERs must be fixed before merge; IMPORTANT/SUGGESTION option
 - Output must be a single **unified diff** fenced in ```diff including `--- a/...` and `+++ b/...` headers.
 - Modify only the files listed above.
 - Do not touch `.github` or workflow files.
+
+### Project Tag
+project_tag: calc_v1
+
