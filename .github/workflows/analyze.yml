@@ -1,4 +1,8 @@
 name: AI Analyzer
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 on:
   issues:
     types: [labeled]
