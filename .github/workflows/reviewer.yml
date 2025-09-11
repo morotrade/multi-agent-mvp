@@ -6,16 +6,6 @@ permissions:
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - "src/**"
-      - "lib/**"
-      - "**/*.py"
-      - "**/*.js"
-      - "**/*.ts"
-      - "**/*.java"
-      - "**/*.go"
-      - "**/*.rs"
-      - "tests/**"
 
 concurrency:
   group: reviewer-${{ github.event.pull_request.number }}
