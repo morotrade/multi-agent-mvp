@@ -1,49 +1,39 @@
-﻿name: AI Code Reviewer
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+name: AI Analyzer
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "src/**"
-      - "lib/**"
-      - "**/*.py"
-      - "**/*.js"
-      - "**/*.ts"
-      - "**/*.java"
-      - "**/*.go"
-      - "**/*.rs"
-      - "tests/**"
+  issues:
+    types: [labeled]
 
 concurrency:
-  group: reviewer-${{ github.event.pull_request.number }}
+  group: analyzer-${{ github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
-  review:
+  analyze:
+    # Parte solo quando aggiungi l’etichetta bot:analyze
+    if: contains(toJson(github.event.issue.labels), 'bot:analyze')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write
+      issues: write
       pull-requests: write
+      projects: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: pip install httpx openai anthropic google-generativeai
 
-      - name: Run AI Reviewer
+      - name: Run Analyzer
         env:
           GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -61,4 +51,4 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
           REPO: ${{ github.repository }}
-        run: python .github/agents/reviewer.py
+        run: python .github/agents/analyzer.py

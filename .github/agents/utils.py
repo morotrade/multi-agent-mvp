@@ -2,6 +2,70 @@
 from typing import List
 
 import httpx
+import json
+
+# --- Project V2 helpers (GraphQL) --------------------------------------------
+GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+
+def _gh_graphql(query: str, variables: dict) -> dict:
+    """Minimal GraphQL client using httpx. Uses GH token from env (GH_CLASSIC_TOKEN or GITHUB_TOKEN)."""
+    token = os.environ.get("GH_CLASSIC_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise RuntimeError("Missing GH_CLASSIC_TOKEN or GITHUB_TOKEN in env for GraphQL")
+
+    headers = {
+        "Authorization": f"bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    with httpx.Client(timeout=30) as client:
+        r = client.post(GITHUB_GRAPHQL_URL, headers=headers, json={"query": query, "variables": variables})
+        r.raise_for_status()
+    data = r.json()
+    if "errors" in data and data["errors"]:
+        raise RuntimeError(f"GraphQL error: {data['errors']}")
+    return data["data"]
+
+def get_issue_node_id(owner: str, repo: str, number: int) -> str:
+    q = """
+    query($owner:String!, $name:String!, $number:Int!){
+      repository(owner:$owner, name:$name){
+        issue(number:$number){ id }
+      }
+    }"""
+    d = _gh_graphql(q, {"owner": owner, "name": repo, "number": number})
+    node = d["repository"]["issue"]
+    if not node:
+        raise RuntimeError(f"Issue #{number} not found")
+    return node["id"]
+
+def add_item_to_project(project_id: str, content_id: str) -> str:
+    """Adds an Issue/PR node to a Project V2. Returns the project item id."""
+    m = """
+    mutation($projectId:ID!, $contentId:ID!){
+      addProjectV2ItemById(input:{projectId:$projectId, contentId:$contentId}){
+        item { id }
+      }
+    }"""
+    d = _gh_graphql(m, {"projectId": project_id, "contentId": content_id})
+    return d["addProjectV2ItemById"]["item"]["id"]
+
+def set_project_single_select(project_id: str, item_id: str, field_id: str, option_id: str) -> None:
+    """Sets a SingleSelect field value (e.g., Status) for a project item."""
+    m = """
+    mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $optionId:String!){
+      updateProjectV2ItemFieldValue(input:{
+        projectId:$projectId,
+        itemId:$itemId,
+        fieldId:$fieldId,
+        value:{ singleSelectOptionId:$optionId }
+      }){ projectV2Item { id } }
+    }"""
+    _gh_graphql(m, {
+        "projectId": project_id,
+        "itemId": item_id,
+        "fieldId": field_id,
+        "optionId": option_id
+    })
 
 def get_github_headers() -> dict:
     return {

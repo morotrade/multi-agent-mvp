@@ -5,7 +5,8 @@ import subprocess
 from utils import (
     get_github_headers, call_llm_api, slugify,
     validate_diff_files, extract_single_diff, apply_diff_resilient,
-    get_repo_language, get_preferred_model
+    get_repo_language, get_preferred_model,
+    get_issue_node_id, add_item_to_project, set_project_single_select
 )
 
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -146,6 +147,24 @@ def main():
         # Recupera dettagli issue
         issue = get_issue_details()
         print(f"📋 Issue: {issue['title']}")
+        
+        # === Project linkage ===
+        owner, repo = REPO.split("/")
+        project_id = os.environ.get("GITHUB_PROJECT_ID")
+        status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
+        status_inprogress = os.environ.get("PROJECT_STATUS_INPROGRESS_ID")
+
+        try:
+            if project_id and status_field_id and status_inprogress:
+                issue_node_id = get_issue_node_id(owner, repo, int(ISSUE_NUMBER))
+                item_id = add_item_to_project(project_id, issue_node_id)
+                set_project_single_select(project_id, item_id, status_field_id, status_inprogress)
+                print(f"📌 Issue #{ISSUE_NUMBER} aggiunta al Project e impostata su 'In progress'")
+            else:
+                print("ℹ️ Project linkage skipped (vars mancanti).")
+        except Exception as e:
+            print(f"⚠️ Project linkage error: {e}")
+
 
         # Crea branch
         branch_name = f"bot/issue-{ISSUE_NUMBER}-{slugify(ISSUE_TITLE)}"

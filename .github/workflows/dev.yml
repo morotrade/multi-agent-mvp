@@ -46,11 +46,23 @@ jobs:
 
       - name: Run AI Developer
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Projects v2 (facoltativi ma consigliati)
+          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
+          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
+          PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
+          PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
+          PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
+          PROJECT_STATUS_DONE_ID: ${{ secrets.PROJECT_STATUS_DONE_ID }}
+          # Dati dell’issue
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-        run: python .github/agents/dev.py
+          REPO: ${{ github.repository }}
+        run: python .github/agents/analyzer.py
+
+
+        

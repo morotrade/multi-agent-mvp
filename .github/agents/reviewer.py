@@ -1,6 +1,6 @@
 ﻿#!/usr/bin/env python3
 import os, re, httpx
-from utils import get_github_headers, call_llm_api, get_preferred_model
+from utils import get_github_headers, call_llm_api, get_preferred_model, set_project_single_select, add_item_to_project, get_issue_node_id
 
 REPO = os.environ["GITHUB_REPOSITORY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -84,9 +84,27 @@ def main():
     try:
         print("🔎 Reviewer: start")
         pr = get_pr_info()
-        branch = pr["head"]["ref"]
+    
+        # Se usi solo env/branch:
+        branch = os.environ.get("GITHUB_HEAD_REF") or ""
         pr_url = pr["html_url"]
         policy = detect_policy(pr)
+        m = re.search(r"issue-(\d+)-", branch)
+        issue_num = int(m.group(1)) if m else None
+
+        project_id = os.environ.get("GITHUB_PROJECT_ID")
+        status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
+        status_inreview = os.environ.get("PROJECT_STATUS_INREVIEW_ID")
+
+        if issue_num and project_id and status_field_id and status_inreview:
+            try:
+                owner, repo = os.environ["GITHUB_REPOSITORY"].split("/")
+                issue_node_id = get_issue_node_id(owner, repo, issue_num)
+                item_id = add_item_to_project(project_id, issue_node_id)  # safe: idempotente
+                set_project_single_select(project_id, item_id, status_field_id, status_inreview)
+                print(f"📌 Issue #{issue_num} impostata su 'In review'")
+            except Exception as e:
+                print(f"⚠️ Project linkage (review) error: {e}")
 
         # Log iniziale visibile in PR
         post_comment(f"🧭 **AI Reviewer avviato** su PR #{PR_NUMBER}\n\n- Branch: `{branch}`\n- Policy: `{policy}`\n- PR: {pr_url}")
