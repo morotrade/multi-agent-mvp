@@ -4,14 +4,23 @@ import httpx
 from utils import (
     get_github_headers, post_issue_comment, create_issue, add_labels,
     get_issue_node_id, add_item_to_project, set_project_single_select,
-    call_llm_api, get_preferred_model
+    call_llm_api, get_preferred_model, resolve_project_tag, ensure_label_exists, add_labels_to_issue
 )
+
 
 REPO = os.environ["GITHUB_REPOSITORY"]
 ISSUE_NUMBER = int(os.environ["ISSUE_NUMBER"])
 
 OWNER, REPO_NAME = REPO.split("/")
-
+PROJECT_TAG = resolve_project_tag(ISSUE_BODY)
+try:
+    ensure_label_exists(owner, repo, PROJECT_TAG, color="0E8A16", description="Project tag")
+    add_labels_to_issue(owner, repo, int(ISSUE_NUMBER), [PROJECT_TAG])
+    print(f"🏷️ Project tag applicato all'issue madre: {PROJECT_TAG}")
+except Exception as e:
+    print(f"⚠️ Project tag: {e}")
+    
+# FIX 1: Compatibilità GH_PROJECT_ID o GITHUB_PROJECT_ID
 PROJECT_ID = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
 STATUS_FIELD_ID = os.environ.get("PROJECT_STATUS_FIELD_ID")
 STATUS_BACKLOG_ID = os.environ.get("PROJECT_STATUS_BACKLOG_ID")
@@ -131,7 +140,7 @@ def main():
     post_issue_comment(
         OWNER, REPO_NAME, ISSUE_NUMBER,
         f"✅ Analyzer completato\n\nPolicy: {policy}\nSprint creati: {1 if sprint_issue_num else 0}\nTask creati: {len(created)}\n\n"
-        f"Per avviare l’implementazione automatica di un task, aggiungi label `bot:implement` (il primo è già etichettato)."
+        f"Per avviare l'implementazione automatica di un task, aggiungi label `bot:implement` (il primo è già etichettato)."
     )
 
 if __name__ == "__main__":

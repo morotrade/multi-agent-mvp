@@ -1,8 +1,5 @@
 ﻿name: AI Developer
-permissions:
-  contents: write
-  pull-requests: write
-  issues: read
+
 on:
   issues:
     types: [labeled]
@@ -19,8 +16,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      issues: write
-      actions: read
+      issues: read
 
     steps:
       - name: Checkout code
@@ -38,31 +34,54 @@ jobs:
         run: |
           git config user.name "ai-dev-bot"
           git config user.email "ai-dev-bot@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
-          git remote -v
 
       - name: Install dependencies
         run: pip install httpx openai anthropic google-generativeai
 
       - name: Run AI Developer
+        # FIX 2: Blocco ENV unificato da aggiungere a TUTTI i workflow (analyze.yml, dev.yml, reviewer.yml, progress.yml)
+# Sostituisci il blocco env: esistente con questo blocco completo
+
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+          # GitHub tokens
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+
+          # Mapping al nome che i .py si aspettano
+          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
+
+          # Campi Project (già creati nei tuoi Secrets)
+          PROJECT_STATUS_FIELD_ID:       ${{ secrets.PROJECT_STATUS_FIELD_ID }}
+          PROJECT_STATUS_BACKLOG_ID:     ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
+          PROJECT_STATUS_INPROGRESS_ID:  ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
+          PROJECT_STATUS_INREVIEW_ID:    ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
+          PROJECT_STATUS_DONE_ID:        ${{ secrets.PROJECT_STATUS_DONE_ID }}
+
+          # (Opzionali se li usi in analyzer/progress)
+          PROJECT_PRIORITY_FIELD_ID:     ${{ secrets.PROJECT_PRIORITY_FIELD_ID }}
+          PROJECT_PRIORITY_P0_ID:        ${{ secrets.PROJECT_PRIORITY_P0_ID }}
+          PROJECT_PRIORITY_P1_ID:        ${{ secrets.PROJECT_PRIORITY_P1_ID }}
+          PROJECT_PRIORITY_P2_ID:        ${{ secrets.PROJECT_PRIORITY_P2_ID }}
+          PROJECT_SIZE_FIELD_ID:         ${{ secrets.PROJECT_SIZE_FIELD_ID }}
+          PROJECT_SIZE_XS_ID:            ${{ secrets.PROJECT_SIZE_XS_ID }}
+          PROJECT_SIZE_S_ID:             ${{ secrets.PROJECT_SIZE_S_ID }}
+          PROJECT_SIZE_M_ID:             ${{ secrets.PROJECT_SIZE_M_ID }}
+          PROJECT_SIZE_L_ID:             ${{ secrets.PROJECT_SIZE_L_ID }}
+          PROJECT_SIZE_XL_ID:            ${{ secrets.PROJECT_SIZE_XL_ID }}
+          PROJECT_ITERATION_FIELD_ID:    ${{ secrets.PROJECT_ITERATION_FIELD_ID }}
+          PROJECT_ITERATION_1_ID:        ${{ secrets.PROJECT_ITERATION_1_ID }}
+          PROJECT_ITERATION_2_ID:        ${{ secrets.PROJECT_ITERATION_2_ID }}
+          PROJECT_ITERATION_3_ID:        ${{ secrets.PROJECT_ITERATION_3_ID }}
+
+          # LLM APIs (usa quelli che hai davvero)
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Projects v2 (facoltativi ma consigliati)
-          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
-          PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
-          PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
-          PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
-          PROJECT_STATUS_DONE_ID: ${{ secrets.PROJECT_STATUS_DONE_ID }}
-          # Dati dell’issue
+
+          # Dati dell'issue/PR (specifici per workflow)
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        run: python .github/agents/analyzer.py
-
-
-        
+        run: python .github/agents/dev.py

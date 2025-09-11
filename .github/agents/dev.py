@@ -6,7 +6,8 @@ from utils import (
     get_github_headers, call_llm_api, slugify,
     validate_diff_files, extract_single_diff, apply_diff_resilient,
     get_repo_language, get_preferred_model,
-    get_issue_node_id, add_item_to_project, set_project_single_select
+    get_issue_node_id, add_item_to_project, set_project_single_select,
+    resolve_project_tag, ensure_label_exists, add_labels_to_issue
 )
 
 REPO = os.environ["GITHUB_REPOSITORY"]
@@ -150,9 +151,19 @@ def main():
         
         # === Project linkage ===
         owner, repo = REPO.split("/")
-        project_id = os.environ.get("GITHUB_PROJECT_ID")
+        PROJECT_TAG = resolve_project_tag(ISSUE_BODY)
+        
+        # FIX 1: Compatibilità GH_PROJECT_ID o GITHUB_PROJECT_ID
+        project_id = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
         status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
         status_inprogress = os.environ.get("PROJECT_STATUS_INPROGRESS_ID")
+        
+        try:
+            ensure_label_exists(owner, repo, PROJECT_TAG, color="0E8A16", description="Project tag")
+            add_labels_to_issue(owner, repo, int(ISSUE_NUMBER), [PROJECT_TAG])
+            print(f"🏷️ Project tag applicato all'issue: {PROJECT_TAG}")
+        except Exception as e:
+            print(f"⚠️ Impossibile applicare project tag: {e}")
 
         try:
             if project_id and status_field_id and status_inprogress:
@@ -167,7 +178,7 @@ def main():
 
 
         # Crea branch
-        branch_name = f"bot/issue-{ISSUE_NUMBER}-{slugify(ISSUE_TITLE)}"
+        branch_name = f"bot/issue-{ISSUE_NUMBER}-{slugify(ISSUE_TITLE)}-{PROJECT_TAG.replace(':','-')}"
         create_branch(branch_name)
         print(f"🌿 Branch creato: {branch_name}")
 
@@ -212,6 +223,13 @@ def main():
         print("🚀 Creazione della Pull Request...")
         pr = create_pr(branch_name, ISSUE_NUMBER, ISSUE_TITLE)
         print(f"✅ Risultato: {pr['html_url']}")
+        
+        try:
+            pr_number = pr.get("number")
+            if pr_number:
+                add_labels_to_issue(owner, repo, int(pr_number), [PROJECT_TAG])
+        except Exception as e:
+            print(f"⚠️ Impossibile aggiungere tag alla PR: {e}")
 
         # Torna al branch main
         subprocess.run(["git", "checkout", "main"], capture_output=True)

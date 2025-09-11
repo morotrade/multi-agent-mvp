@@ -1,6 +1,9 @@
 ﻿#!/usr/bin/env python3
 import os, re, httpx
-from utils import get_github_headers, call_llm_api, get_preferred_model, set_project_single_select, add_item_to_project, get_issue_node_id
+from utils import (get_github_headers, call_llm_api, get_preferred_model, 
+                   set_project_single_select, add_item_to_project, get_issue_node_id,
+                    extract_single_diff,  resolve_project_tag, ensure_label_exists, add_labels_to_issue)
+
 
 REPO = os.environ["GITHUB_REPOSITORY"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -92,19 +95,29 @@ def main():
         m = re.search(r"issue-(\d+)-", branch)
         issue_num = int(m.group(1)) if m else None
 
-        project_id = os.environ.get("GITHUB_PROJECT_ID")
+        # FIX 1: Compatibilità GH_PROJECT_ID o GITHUB_PROJECT_ID
+        project_id = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
         status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
         status_inreview = os.environ.get("PROJECT_STATUS_INREVIEW_ID")
 
         if issue_num and project_id and status_field_id and status_inreview:
             try:
                 owner, repo = os.environ["GITHUB_REPOSITORY"].split("/")
+                PROJECT_TAG = resolve_project_tag("")                       # reviewer non ha ISSUE_BODY; leggerà env/file
                 issue_node_id = get_issue_node_id(owner, repo, issue_num)
-                item_id = add_item_to_project(project_id, issue_node_id)  # safe: idempotente
+                item_id = add_item_to_project(project_id, issue_node_id)    # safe: idempotente
                 set_project_single_select(project_id, item_id, status_field_id, status_inreview)
                 print(f"📌 Issue #{issue_num} impostata su 'In review'")
             except Exception as e:
                 print(f"⚠️ Project linkage (review) error: {e}")
+            
+            try:
+                ensure_label_exists(owner, repo, PROJECT_TAG, color="0E8A16", description="Project tag")
+                # Aggiungi label alla PR
+                add_labels_to_issue(owner, repo, int(PR_NUMBER), [PROJECT_TAG])
+                print(f"🏷️ Project tag applicato alla PR: {PROJECT_TAG}")
+            except Exception as e:
+                print(f"⚠️ Impossibile applicare project tag alla PR: {e}")
 
         # Log iniziale visibile in PR
         post_comment(f"🧭 **AI Reviewer avviato** su PR #{PR_NUMBER}\n\n- Branch: `{branch}`\n- Policy: `{policy}`\n- PR: {pr_url}")
@@ -120,7 +133,7 @@ def main():
         print("call LLM…")
         analysis = call_llm_api(prompt, model=model)
 
-        # Posta l’analisi completa
+        # Posta l'analisi completa
         post_comment(f"## 🤖 AI Code Review\n\n{analysis}\n\n---\n*Revisione automatica*")
 
         # Estrai BLOCKER/IMPORTANT

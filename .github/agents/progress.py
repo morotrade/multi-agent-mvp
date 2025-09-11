@@ -29,11 +29,11 @@ def main():
     # In Actions, meglio rifetch PR con id dall'evento
     if not pr:
         # fallback: usa API events context? per semplicità rifacciamo GET con numero PR dal env GITHUB_REF?
-        print("ℹ️ Progressor: leggo PR dall’API usando GITHUB_REF.")
+        print("ℹ️ Progressor: leggo PR dall'API usando GITHUB_REF.")
         ref = os.environ.get("GITHUB_REF", "")
         m = re.search(r"refs/pull/(\d+)/merge", ref)
         if not m:
-            print("❌ Non trovo numero PR")
+            print("⌚ Non trovo numero PR")
             return
         pr_num = int(m.group(1))
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}"
@@ -58,7 +58,7 @@ def main():
         print(f"ℹ️ Nessun task fratello aperto per Parent #{parent}.")
         return
 
-    # Scegli il “prossimo”: quello con numero più basso, o ordinamento semplice
+    # Scegli il "prossimo": quello con numero più basso, o ordinamento semplice
     candidates = sorted((it for it in siblings if it["number"] != closing_issue), key=lambda x: x["number"])
     if not candidates:
         print("ℹ️ Nessun prossimo task da avviare.")
@@ -74,10 +74,11 @@ def main():
     labels.add("bot:implement")
     httpx.patch(url, headers=get_github_headers(), json={"labels": list(labels)}, timeout=30).raise_for_status()
 
-    # Sposta a In progress sul Project (se configurato)
-    project_id           = os.environ.get("GITHUB_PROJECT_ID")
+    # FIX 1: Compatibilità GH_PROJECT_ID o GITHUB_PROJECT_ID
+    project_id           = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
     status_field_id      = os.environ.get("PROJECT_STATUS_FIELD_ID")
     status_inprogress_id = os.environ.get("PROJECT_STATUS_INPROGRESS_ID")
+    
     if project_id and status_field_id and status_inprogress_id:
         try:
             node_id = get_issue_node_id(owner, repo, next_issue_num)

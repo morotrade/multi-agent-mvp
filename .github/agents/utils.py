@@ -260,3 +260,84 @@ def get_repo_language() -> str:
         return "Python"
     except:
         return "Python"
+    
+def _read_project_tag_from_file() -> str | None:
+    """
+    Cerca il tag di progetto in:
+      - issue_tagProgetto.md (riga 'ProjectTag: <valore>' o prima riga non vuota)
+      - .project-tag (prima riga non vuota)
+    """
+    candidates = ["issue_tagProgetto.md", ".project-tag"]
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    content = f.read()
+                m = re.search(r"(?im)^\s*ProjectTag\s*:\s*([^\s]+)\s*$", content)
+                if m:
+                    return m.group(1).strip()
+                # fallback: prima riga non vuota
+                for line in content.splitlines():
+                    line = line.strip()
+                    if line:
+                        return line
+            except:
+                pass
+    return None
+
+def resolve_project_tag(issue_body: str | None = "") -> str:
+    """
+    Priorità:
+    1) env PROJECT_TAG
+    2) file issue_tagProgetto.md / .project-tag
+    3) body issue riga 'ProjectTag: <valore>'
+    4) fallback 'proj:default'
+    """
+    # 1) ENV
+    env_tag = os.environ.get("PROJECT_TAG")
+    if env_tag:
+        return env_tag.strip()
+
+    # 2) file
+    file_tag = _read_project_tag_from_file()
+    if file_tag:
+        return file_tag.strip()
+
+    # 3) issue body
+    if issue_body:
+        m = re.search(r"(?im)^\s*ProjectTag\s*:\s*([^\s]+)\s*$", issue_body)
+        if m:
+            return m.group(1).strip()
+
+    # 4) fallback
+    return "proj:default"
+
+def ensure_label_exists(owner: str, repo: str, label: str, color: str = "BFDADC", description: str = "Project scoped tag") -> None:
+    """
+    Crea il label se non esiste (idempotente).
+    """
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = get_github_headers()
+    with httpx.Client(timeout=30) as client:
+        # GET label
+        r = client.get(f"{base}/labels/{label}", headers=headers)
+        if r.status_code == 200:
+            return
+        # CREATE
+        data = {"name": label, "color": color, "description": description}
+        r = client.post(f"{base}/labels", headers=headers, json=data)
+        # Se esiste già o creato con successo, ok; altrimenti logga
+        if r.status_code not in (200, 201, 422):
+            print(f"⚠️ Impossibile creare label {label}: {r.status_code} {r.text}")
+
+def add_labels_to_issue(owner: str, repo: str, issue_number: int, labels: list[str]) -> None:
+    """
+    Aggiunge label a Issue/PR (PR sono issue lato API) — idempotente.
+    """
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = get_github_headers()
+    data = {"labels": labels}
+    with httpx.Client(timeout=30) as client:
+        r = client.post(f"{base}/issues/{issue_number}/labels", headers=headers, json=data)
+        if r.status_code not in (200, 201):
+            print(f"⚠️ add_labels_to_issue: {r.status_code} {r.text}")
