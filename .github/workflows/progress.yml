@@ -1,0 +1,29 @@
+name: Next Task Progressor
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  next-task:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install httpx
+      - name: Run progressor
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
+          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
+          PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
+          PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
+        run: python .github/agents/progress.py
