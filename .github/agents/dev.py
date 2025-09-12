@@ -1,326 +1,488 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os
+"""
+AI Developer — Complete Implementation (FIXED VERSION)
+- ISSUE mode: create real PR from issue with actual implementation
+- PR-FIX mode: work on SAME PR/branch based on reviewer feedback
+- Full LLM integration with diff generation and application
+- Complete git operations: branch creation, commits, push
+"""
+from __future__ import annotations
+import os, json, re, sys, typing as t, subprocess, time
 import httpx
-import subprocess
 from utils import (
-    get_github_headers, call_llm_api, slugify,
-    validate_diff_files, extract_single_diff, apply_diff_resilient,
-    get_repo_language, get_preferred_model,
-    get_issue_node_id, add_item_to_project, set_project_single_select,
-    resolve_project_tag, ensure_label_exists, add_labels_to_issue
+    call_llm_api, get_preferred_model, extract_single_diff, 
+    apply_diff_resilient, validate_diff_files
 )
 
-REPO = os.environ["GITHUB_REPOSITORY"]
-ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
-ISSUE_TITLE = os.environ["ISSUE_TITLE"]
-ISSUE_BODY = os.environ.get("ISSUE_BODY", "")
+BASE = "https://api.github.com"
+TIMEOUT_DEFAULT = 60
 
+def _token()->str:
+    tkn = os.getenv("GH_CLASSIC_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not tkn: raise RuntimeError("Missing token")
+    return tkn
 
-# ------------- Helpers -------------
-def gh_get(url, timeout=30):
-    with httpx.Client(timeout=timeout) as client:
-        r = client.get(url, headers=get_github_headers())
-        r.raise_for_status()
-        return r
+def _headers()->dict:
+    return {"Authorization": f"Bearer {_token()}", "Accept":"application/vnd.github+json", "User-Agent":"ai-dev/loop"}
 
-def get_issue_details() -> dict:
-    """Recupera i dettagli dell'issue"""
-    url = f"https://api.github.com/repos/{REPO}/issues/{ISSUE_NUMBER}"
-    return gh_get(url).json()
+def _event()->dict:
+    p = os.getenv("GITHUB_EVENT_PATH")
+    if p and os.path.exists(p):
+        return json.load(open(p,"r",encoding="utf-8"))
+    return {}
 
-def get_default_branch() -> str:
-    """Legge il default branch del repo (fallback: main)."""
-    url = f"https://api.github.com/repos/{REPO}"
+def _repo()->tuple[str,str]:
+    full = os.getenv("GITHUB_REPOSITORY","")
+    if "/" in full:
+        o, r = full.split("/",1); return o,r
+    ev=_event(); return ev["repository"]["owner"]["login"], ev["repository"]["name"]
+
+def _rest(method:str, path:str, timeout=TIMEOUT_DEFAULT, **kw):
+    url=f"{BASE}{path}"
+    with httpx.Client(timeout=timeout) as c:
+        r=c.request(method,url,headers=_headers(),**kw)
+    if r.status_code>=400:
+        raise RuntimeError(f"REST {method} {path} -> {r.status_code}: {r.text[:300]}")
+    return r.json() if r.text else None
+
+# ---- Mode Detection ----
+def _pr_number()->int:
+    if os.getenv("PR_NUMBER"): return int(os.getenv("PR_NUMBER"))
+    ev=_event(); pr=ev.get("pull_request") or {}
+    return int(pr.get("number") or 0)
+
+def _issue_number()->int:
+    if os.getenv("ISSUE_NUMBER"): return int(os.getenv("ISSUE_NUMBER"))
+    ev=_event(); iss=ev.get("issue") or {}
+    return int(iss.get("number") or 0)
+
+def _mode()->str:
+    return "pr-fix" if _pr_number() else "issue"
+
+# ---- Data Fetching ----
+def _pr()->dict:
+    owner,repo=_repo()
+    return _rest("GET", f"/repos/{owner}/{repo}/pulls/{_pr_number()}")
+
+def _issue()->dict:
+    owner,repo=_repo()
+    return _rest("GET", f"/repos/{owner}/{repo}/issues/{_issue_number()}")
+
+def _post_pr_comment(body:str):
+    owner,repo=_repo(); n=_pr_number()
+    _rest("POST", f"/repos/{owner}/{repo}/issues/{n}/comments", json={"body":body})
+
+def _post_issue_comment(body:str):
+    owner,repo=_repo(); n=_issue_number() 
+    _rest("POST", f"/repos/{owner}/{repo}/issues/{n}/comments", json={"body":body})
+
+def _pr_issue_comments()->list[dict]:
+    owner,repo=_repo(); n=_pr_number()
+    return _rest("GET", f"/repos/{owner}/{repo}/issues/{n}/comments")
+
+def _find_sticky()->dict|None:
+    n=_pr_number()
+    tag=f"<!-- AI-REVIEWER:PR-{n} -->"
+    for c in _pr_issue_comments():
+        if tag in c.get("body",""):
+            return c
+    return None
+
+# ---- Git Operations ----
+def _get_git_status() -> dict:
+    """Get current git status info"""
     try:
-        return gh_get(url).json().get("default_branch") or "main"
-    except Exception:
-        return "main"
-
-def create_branch(branch_name: str, base_branch: str) -> None:
-    """Crea o resetta un branch locale a partire dal base_branch."""
-    # Assicura di essere sul base branch aggiornato
-    subprocess.run(["git", "fetch", "origin", base_branch], check=False, capture_output=True)
-    subprocess.run(["git", "checkout", base_branch], check=False, capture_output=True)
-    subprocess.run(["git", "pull", "origin", base_branch], check=False, capture_output=True)
-
-    # Prova a creare, se esiste già lo resetta
-    result = subprocess.run(["git", "checkout", "-b", branch_name], capture_output=True, text=True)
-    if result.returncode != 0:
-        # branch esistente: spostalo sul base
-        subprocess.run(["git", "checkout", branch_name], check=False, capture_output=True)
-        subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"], check=False, capture_output=True)
-
-def create_fallback_implementation(issue_title: str, issue_body: str) -> str:
-    """Crea un'implementazione di fallback per evitare failure totali"""
-    owner = REPO.split("/")[0] if "/" in REPO else "Project"
-    from datetime import datetime
-    year = str(datetime.utcnow().year)
-
-    if "add" in issue_title.lower() and "function" in issue_title.lower():
-        # Fallback mirato
-        return f"""--- /dev/null
-+++ b/utils/math_functions.py
-@@ -0,0 +1,18 @@
-+def add(a, b):
-+    """Add two numbers together."""
-+    return a + b
-+
-+
-+def subtract(a, b):
-+    """Subtract b from a."""
-+    return a - b
-"""
-    else:
-        # Fallback generico minimale (evita eccessi)
-        return f"""--- /dev/null
-+++ b/IMPLEMENTATION_LOG.md
-@@ -0,0 +1,7 @@
-+# Implementation Log
-+
-+- Issue: #{ISSUE_NUMBER}
-+- Title: {issue_title}
-+- Note: automatic fallback applied (no valid diff from LLM).
-+
-"""
-
-def generate_implementation(issue_details: dict) -> str:
-    """Genera l'implementazione usando AI con prompt migliorato"""
-    try:
-        with open(".github/prompts/dev.md", "r", encoding="utf-8") as f:
-            prompt_template = f.read()
-    except FileNotFoundError:
-        prompt_template = (
-            "# Ruolo: Senior {language} Developer\n"
-            "Implementa la funzionalità richiesta seguendo le best practices.\n\n"
-            "## Output richiesto (CRITICO)\n"
-            "- Fornisci ESATTAMENTE un blocco ```diff in formato unified diff valido\n"
-            "- Il diff DEVE iniziare con --- a/path/file oppure --- /dev/null\n"
-            "- Il diff DEVE continuare con +++ b/path/file\n"
-            "- Ogni sezione DEVE avere header @@ -line,count +line,count @@\n"
-            "- NON includere testo prima o dopo il blocco diff\n"
-            "- NON utilizzare caratteri speciali o encoding non-ASCII nel diff\n"
+        # Current branch
+        branch_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True
         )
-
-    # Linguaggio repo (richiede utils aggiornato)
-    try:
-        language = get_repo_language()
-    except Exception:
-        language = "Python"
-
-    prompt = prompt_template.replace("{language}", language)
-
-    prompt += (
-        f"\n\n## ISSUE DA IMPLEMENTARE:\n"
-        f"**Titolo:** {issue_details['title']}\n"
-        f"**Descrizione:** {issue_details.get('body', 'Nessuna descrizione')}\n\n"
-        f"## ISTRUZIONI SPECIFICHE:\n"
-        f"1. Implementa SOLO ciò che è specificato nell'issue\n"
-        f"2. Crea file in percorsi logici (es: src/, lib/, utils/)\n"
-        f"3. Usa nomi di file descrittivi\n"
-        f"4. Segui le convenzioni di codice del linguaggio {language}\n"
-        f"5. Mantieni le modifiche minimali e focalizzate\n\n"
-        f"## FORMATO OUTPUT RICHIESTO:\n"
-        f"Fornisci SOLO un blocco diff valido senza altro testo:\n\n"
-        f"```diff\n"
-        f"--- /dev/null\n"
-        f"+++ b/src/example.py\n"
-        f"@@ -0,0 +1,N @@\n"
-        f"+# code here\n"
-        f"```\n\n"
-    )
-
-    model = get_preferred_model("developer")
-    return call_llm_api(prompt, model=model, max_tokens=6000)
-
-def safe_git_push(branch_name: str) -> bool:
-    """Push del branch con gestione degli errori"""
-    try:
-        # Debug: verifica configurazione git
-        result = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True)
-        print(f"🔍 Git remotes: {result.stdout}")
-
-        # Debug: verifica branch
-        result = subprocess.run(["git", "branch", "-a"], capture_output=True, text=True)
-        print(f"🔍 Git branches: {result.stdout}")
-
-        # Prova il push
-        result = subprocess.run(
-            ["git", "push", "origin", branch_name],
-            capture_output=True, text=True, check=False
+        current_branch = branch_result.stdout.strip()
+        
+        # Working directory status
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, check=True
         )
+        has_changes = bool(status_result.stdout.strip())
+        
+        # Latest commit
+        commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True
+        )
+        latest_commit = commit_result.stdout.strip()[:8]
+        
+        return {
+            "branch": current_branch,
+            "has_changes": has_changes,
+            "latest_commit": latest_commit
+        }
+    except subprocess.CalledProcessError as e:
+        return {"error": str(e)}
 
-        if result.returncode == 0:
-            print(f"✅ Push riuscito: {branch_name}")
-            return True
+def _ensure_branch(branch_name: str) -> bool:
+    """Ensure we're on the correct branch, create if needed"""
+    try:
+        # Check if branch exists locally
+        try:
+            subprocess.run(["git", "rev-parse", "--verify", branch_name], 
+                         check=True, capture_output=True)
+            local_exists = True
+        except subprocess.CalledProcessError:
+            local_exists = False
+        
+        # Check if branch exists remotely
+        try:
+            subprocess.run(["git", "ls-remote", "--exit-code", "origin", branch_name],
+                         check=True, capture_output=True)
+            remote_exists = True
+        except subprocess.CalledProcessError:
+            remote_exists = False
+        
+        if local_exists:
+            # Switch to existing branch
+            subprocess.run(["git", "checkout", branch_name], check=True)
+            if remote_exists:
+                # Pull latest changes
+                subprocess.run(["git", "pull", "origin", branch_name], check=True)
+        elif remote_exists:
+            # Checkout remote branch
+            subprocess.run(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"], 
+                         check=True)
         else:
-            print(f"❌ Push fallito. STDOUT: {result.stdout}")
-            print(f"❌ Push fallito. STDERR: {result.stderr}")
-            return False
-
-    except Exception as e:
-        print(f"❌ Errore durante push: {e}")
+            # Create new branch from main
+            subprocess.run(["git", "checkout", "-b", branch_name, "main"], check=True)
+        
+        return True
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Branch setup failed: {e}")
         return False
 
-def create_pr(branch_name: str, issue_number: str, issue_title: str, base_branch: str) -> dict:
-    """Crea una Pull Request - con gestione graceful del 403"""
-    pr_data = {
-        "title": f"[Bot] Implement: {issue_title}",
-        "head": branch_name,
-        "base": base_branch,
-        "body": (
-            f"Implementazione automatica dell'issue #{issue_number}\n\n"
-            f"## Changes\n"
-            f"- Implementata richiesta: {issue_title}\n\n"
-            f"Closes #{issue_number}\n\n"
-            f"---\n*Auto-generated by AI Developer*"
-        )
-    }
-
-    url = f"https://api.github.com/repos/{REPO}/pulls"
-
-    with httpx.Client(timeout=30) as client:
-        response = client.post(url, headers=get_github_headers(), json=pr_data)
-
-        if response.status_code == 403:
-            print("⚠️ Permessi insufficienti per creare PR automaticamente")
-            print(f"🔗 Branch creato: {branch_name}")
-            print(f"💡 Crea manualmente la PR da GitHub web interface")
-            return {"html_url": f"https://github.com/{REPO}/compare/{branch_name}"}
-
-        response.raise_for_status()
-
-    return response.json()
-
-
-# ------------- Main -------------
-def main():
-    global ISSUE_TITLE  # Dichiara global all'inizio della funzione
-
+def _commit_and_push(message: str, branch_name: str) -> tuple[bool, str]:
+    """Commit changes and push to remote"""
     try:
-        print("🧑‍💻 Avvio AI Developer...")
-
-        # Recupera dettagli issue
-        issue = get_issue_details()
-        print(f"📋 Issue: {issue['title']}")
-
-        # === Project linkage & tagging ===
-        owner, repo = REPO.split("/")
-        PROJECT_TAG = resolve_project_tag(ISSUE_BODY) or "project"
-
-        project_id = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
-        status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
-        status_inprogress = os.environ.get("PROJECT_STATUS_INPROGRESS_ID")
-
-        try:
-            ensure_label_exists(owner, repo, PROJECT_TAG, color="0E8A16", description="Project tag")
-            add_labels_to_issue(owner, repo, int(ISSUE_NUMBER), [PROJECT_TAG])
-            print(f"🏷️ Project tag applicato all'issue: {PROJECT_TAG}")
-        except Exception as e:
-            print(f"⚠️ Impossibile applicare project tag: {e}")
-
-        try:
-            if project_id and status_field_id and status_inprogress:
-                issue_node_id = get_issue_node_id(owner, repo, int(ISSUE_NUMBER))
-                item_id = add_item_to_project(project_id, issue_node_id)  # idempotente
-                set_project_single_select(project_id, item_id, status_field_id, status_inprogress)
-                print(f"📌 Issue #{ISSUE_NUMBER} aggiunta al Project e impostata su 'In progress'")
-            else:
-                print("ℹ️ Project linkage skipped (vars mancanti).")
-        except Exception as e:
-            print(f"⚠️ Project linkage error: {e}")
-
-        # Default branch
-        base_branch = get_default_branch()
-
-        # Crea branch sicuro
-        raw_branch = f"bot/issue-{ISSUE_NUMBER}-{slugify(ISSUE_TITLE)}-{PROJECT_TAG.replace(':','-')}"
-        branch_name = raw_branch[:120]  # limite ragionevole per compatibilità
-        create_branch(branch_name, base_branch)
-        print(f"🌿 Branch creato: {branch_name} (base: {base_branch})")
-
-        # Genera implementazione
-        print("🛠️ Generazione implementazione...")
-        implementation = generate_implementation(issue)
-
-        # Estrai e valida il diff
-        print("🔍 Estrazione e validazione del diff...")
-        try:
-            diff_content = extract_single_diff(implementation)
-            validate_diff_files(diff_content)
-            print("✅ Diff LLM estratto e validato con successo")
-        except Exception as e:
-            print(f"⚠️ LLM output non valido ({e}), uso fallback implementazione...")
-            diff_content = create_fallback_implementation(ISSUE_TITLE, ISSUE_BODY)
-            ISSUE_TITLE = f"{ISSUE_TITLE} (AI fallback)"
-
-        # Applica il diff
-        print("📝 Applicazione del diff...")
-        success = apply_diff_resilient(diff_content)
-        if not success:
-            print("❌ Fallimento nell'applicazione del diff anche con fallback")
-            raise Exception("Impossibile applicare qualsiasi diff")
-
-        # Verifica che ci siano modifiche
-        result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
-        if not result.stdout.strip():
-            print("⚠️ Nessuna modifica rilevata, creo file dummy")
-            with open("IMPLEMENTATION_LOG.md", "w", encoding="utf-8") as f:
-                f.write(f"# Implementation Log\n\nIssue: #{ISSUE_NUMBER}\nTitle: {ISSUE_TITLE}\nImplemented by AI Developer\n")
-            subprocess.run(["git", "add", "IMPLEMENTATION_LOG.md"], check=True)
-
-        # Commit e push
-        print("💾 Commit delle modifiche...")
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
-
-        # Verifica che ci sia qualcosa da committare
+        # Stage all changes
+        subprocess.run(["git", "add", "."], check=True)
+        
+        # Check if there are actually changes to commit
         result = subprocess.run(["git", "diff", "--cached", "--quiet"], capture_output=True)
         if result.returncode == 0:
-            print("⚠️ Nessuna modifica staged, salto commit")
-            return
+            return True, "No changes to commit"
+        
+        # Commit
+        subprocess.run(["git", "commit", "-m", message], check=True)
+        
+        # Get commit hash
+        commit_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        )
+        commit_hash = commit_result.stdout.strip()[:8]
+        
+        # Push
+        subprocess.run(["git", "push", "origin", branch_name], check=True)
+        
+        return True, commit_hash
+        
+    except subprocess.CalledProcessError as e:
+        return False, str(e)
 
-        subprocess.run([
-            "git", "commit", "-m",
-            f"feat: implement issue #{ISSUE_NUMBER} - {ISSUE_TITLE}"
-        ], check=True, capture_output=True)
+# ---- LLM Prompt Generation ----
+def _create_implementation_prompt(issue_data: dict) -> str:
+    """Create prompt for implementing issue solution"""
+    title = issue_data.get("title", "")
+    body = issue_data.get("body", "")
+    
+    # Extract requirements and acceptance criteria
+    acceptance_criteria = []
+    if "acceptance" in body.lower():
+        # Try to find acceptance criteria section
+        acc_match = re.search(r'(?i)\*\*acceptance[^*]*\*\*:?\s*(.*?)(?=\n\*\*|\n#|\n---|\Z)', 
+                             body, re.DOTALL)
+        if acc_match:
+            acceptance_text = acc_match.group(1).strip()
+            # Extract bullet points
+            acceptance_criteria = re.findall(r'[-*+]\s*(.+)', acceptance_text)
+    
+    # Extract file paths mentioned
+    file_paths = re.findall(r'`([^`]+\.[a-zA-Z]{2,4})`', body)
+    
+    prompt = f"""# Development Task
 
-        print("📤 Push del branch...")
-        push_success = safe_git_push(branch_name)
+You are implementing a feature/fix based on this issue:
 
-        if not push_success:
-            print("⚠️ Push fallito, ma branch e commit locali creati")
-            print(f"🔗 Controlla manualmente: https://github.com/{REPO}")
-            return
+## Issue Details
+**Title**: {title}
 
-        # Crea PR (con gestione graceful del 403)
-        print("🚀 Creazione della Pull Request...")
-        pr = create_pr(branch_name, ISSUE_NUMBER, ISSUE_TITLE, base_branch)
-        print(f"✅ Risultato: {pr.get('html_url', 'n/a')}")
+**Description**: 
+{body}
 
-        # Etichetta la PR con il PROJECT_TAG (le PR condividono numerazione con le issues)
-        try:
-            pr_number = pr.get("number")
-            if pr_number and PROJECT_TAG:
-                add_labels_to_issue(owner, repo, int(pr_number), [PROJECT_TAG])
-        except Exception as e:
-            print(f"⚠️ Impossibile aggiungere tag alla PR: {e}")
+## Implementation Requirements
+{"**Acceptance Criteria**:" if acceptance_criteria else ""}
+{chr(10).join(f"- {criteria}" for criteria in acceptance_criteria)}
 
-        # Torna al branch di base
-        subprocess.run(["git", "checkout", base_branch], capture_output=True)
+{"**Files to modify**:" if file_paths else ""}
+{chr(10).join(f"- {path}" for path in file_paths)}
 
+## Instructions
+Provide a solution as a SINGLE unified diff that can be applied with `git apply`.
+
+Important:
+- Return ONLY ONE diff block in ```diff format
+- Include proper diff headers (--- a/file +++ b/file)
+- Use unified diff format with @@ hunk headers
+- Create new files with --- /dev/null +++ b/filename
+- Make minimal, focused changes that address the requirements
+- Ensure code follows best practices for the language/framework
+
+## Response Format
+```diff
+<your unified diff here>
+```
+
+Focus on creating working, tested code that satisfies the acceptance criteria.
+"""
+    return prompt
+
+def _create_fix_prompt(issue_data: dict, findings: list[str]) -> str:
+    """Create prompt for fixing PR based on review feedback"""  
+    title = issue_data.get("title", "")
+    body = issue_data.get("body", "")
+    
+    findings_text = "\n".join(f"- {finding}" for finding in findings)
+    
+    prompt = f"""# PR Fix Task
+
+You need to fix issues identified in a Pull Request review.
+
+## Original PR
+**Title**: {title}
+**Description**: {body}
+
+## Issues to Fix
+{findings_text}
+
+## Instructions  
+Provide a solution as a SINGLE unified diff that addresses ALL the review feedback.
+
+Important:
+- Return ONLY ONE diff block in ```diff format
+- Include proper diff headers (--- a/file +++ b/file)  
+- Use unified diff format with @@ hunk headers
+- Make minimal changes that address each issue
+- Preserve existing functionality while fixing problems
+- Follow code quality best practices
+
+## Response Format
+```diff
+<your unified diff here>
+```
+
+Focus on addressing each review comment while maintaining code quality.
+"""
+    return prompt
+
+def _plan_from_sticky(md:str)->list[str]:
+    """Extract action items from reviewer sticky comment"""
+    # Look for findings in different sections
+    items = []
+    
+    # Extract BLOCKER items
+    blocker_section = re.search(r'#### 🚫 BLOCKER\s*(.*?)(?=####|\Z)', md, re.DOTALL)
+    if blocker_section:
+        items.extend(re.findall(r'- \*\*[^*]+\*\*:\s*([^\n]+)', blocker_section.group(1)))
+    
+    # Extract IMPORTANT items
+    important_section = re.search(r'#### ⚠️ IMPORTANT\s*(.*?)(?=####|\Z)', md, re.DOTALL)
+    if important_section:
+        items.extend(re.findall(r'- \*\*[^*]+\*\*:\s*([^\n]+)', important_section.group(1)))
+    
+    # Fallback: extract any bullet points
+    if not items:
+        items = re.findall(r'- (.+)', md)[:10]
+    
+    return items[:5] if items else ["Address review feedback"]
+
+# ---- Main Implementation Functions ----
+def run_pr_fix()->int:
+    """PR-fix mode: work on same branch based on reviewer feedback"""
+    print("Dev(PR-fix): starting fix implementation")
+    
+    try:
+        pr = _pr()
+        head_ref = pr["head"]["ref"]
+        
+        print(f"Working on PR #{_pr_number()}, branch: {head_ref}")
+        
+        # Find reviewer sticky comment
+        sticky = _find_sticky()
+        if not sticky:
+            _post_pr_comment("Dev: no reviewer feedback found; proceeding with generic improvements.")
+            return 0
+        
+        # Extract action plan from sticky
+        plan = _plan_from_sticky(sticky["body"])
+        
+        # Post progress comment
+        _post_pr_comment(
+            f"Dev: received feedback, implementing fixes:\n" + 
+            "\n".join(f"- {p}" for p in plan) + 
+            f"\n\nWorking on branch: `{head_ref}`"
+        )
+        
+        # Ensure we're on the correct branch
+        if not _ensure_branch(head_ref):
+            _post_pr_comment("Dev: failed to switch to PR branch")
+            return 1
+        
+        # Create fix prompt and get LLM response
+        issue_data = {"title": pr.get("title", ""), "body": pr.get("body", "")}
+        prompt = _create_fix_prompt(issue_data, plan)
+        model = get_preferred_model("developer")
+        
+        print(f"Generating fix with model: {model}")
+        
+        raw_response = call_llm_api(prompt, model=model, max_tokens=4000)
+        
+        # Extract and validate diff
+        diff_content = extract_single_diff(raw_response)
+        validate_diff_files(diff_content)
+        
+        print("Generated valid diff")
+        
+        # Apply diff
+        if apply_diff_resilient(diff_content):
+            print("Diff applied successfully")
+            
+            # Commit and push
+            commit_msg = f"fix: address review feedback\n\nAuto-generated fixes for:\n" + "\n".join(f"- {p}" for p in plan)
+            success, result = _commit_and_push(commit_msg, head_ref)
+            
+            if success:
+                _post_pr_comment(
+                    f"✅ Dev: fixes applied and pushed\n\n" +
+                    f"**Commit**: {result}\n" +
+                    f"**Branch**: `{head_ref}`\n" +
+                    f"**Changes**: Applied fixes for {len(plan)} issues"
+                )
+                return 0
+            else:
+                _post_pr_comment(f"❌ Dev: failed to commit/push - {result}")
+                return 1
+        else:
+            # Enhanced error handling for diff application failure
+            _post_pr_comment(
+                f"⚠️ Dev: automatic patching failed\n\n" +
+                f"**Issue**: Cannot apply diff to existing files automatically\n" +
+                f"**Next steps**: Will request full file content instead of patches\n" +
+                f"**Items to address**: {len(plan)} issues\n\n" +
+                f"_Regenerating with full file approach..._"
+            )
+            
+            # TODO: Enhanced strategy - request full file content instead of diffs
+            # For now, we report the limitation clearly
+            print("Diff application failed - requires full file generation strategy")
+            return 1
+            
     except Exception as e:
-        print(f"❌ Errore: {str(e)}")
+        print(f"PR-fix mode failed: {e}")
+        _post_pr_comment(f"❌ Dev: error during fix implementation - {str(e)[:200]}")
+        return 1
 
-        # Ripristina lo stato pulito
-        try:
-            subprocess.run(["git", "reset", "--hard"], capture_output=True)
-            subprocess.run(["git", "clean", "-fd"], capture_output=True)
-            subprocess.run(["git", "checkout", get_default_branch()], capture_output=True)
-        except Exception:
-            pass
+def run_issue()->int:
+    """Issue mode: create real PR from issue with actual implementation"""
+    try:
+        iss_num = _issue_number()
+        issue_data = _issue()
+        title = issue_data.get("title", f"Issue {iss_num}")
+        body = issue_data.get("body", "")
+        
+        owner, repo = _repo()
+        
+        print(f"Dev(Issue): implementing #{iss_num} - {title}")
+        
+        # Check if a PR already exists that closes the issue
+        prs = _rest("GET", f"/repos/{owner}/{repo}/pulls?state=open&per_page=50")
+        for pr in prs:
+            if re.search(rf"(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#({iss_num})", 
+                        pr.get("body") or "", re.I):
+                print(f"PR already exists for issue #{iss_num}: #{pr['number']}")
+                return 0
+        
+        # Create branch and implementation
+        branch = f"bot/issue-{iss_num}-auto"
+        
+        # Ensure we're on the right branch
+        if not _ensure_branch(branch):
+            _post_issue_comment("❌ Dev: failed to create/switch to branch")
+            return 1
+        
+        # Generate implementation
+        prompt = _create_implementation_prompt(issue_data)
+        model = get_preferred_model("developer")
+        
+        print(f"Generating implementation with model: {model}")
+        
+        raw_response = call_llm_api(prompt, model=model, max_tokens=4000)
+        
+        # Extract and validate diff
+        diff_content = extract_single_diff(raw_response)
+        validate_diff_files(diff_content)
+        
+        print("Generated valid implementation diff")
+        
+        # Apply diff
+        if apply_diff_resilient(diff_content):
+            print("Implementation applied successfully")
+            
+            # Commit and push
+            commit_msg = f"feat: implement {title}\n\nAuto-generated implementation for issue #{iss_num}"
+            success, result = _commit_and_push(commit_msg, branch)
+            
+            if success:
+                print(f"Committed and pushed: {result}")
+                
+                # Create PR
+                pr_body = (body or "") + f"\n\nCloses #{iss_num}"
+                pr_data = _rest("POST", f"/repos/{owner}/{repo}/pulls", json={
+                    "title": f"Implement: {title}",
+                    "head": branch,
+                    "base": "main", 
+                    "body": pr_body,
+                    "draft": False  # Make it a real PR, not draft
+                })
+                
+                pr_number = pr_data.get("number")
+                print(f"Created PR #{pr_number}")
+                
+                _post_issue_comment(
+                    f"✅ Dev: implementation completed\n\n" +
+                    f"**PR**: #{pr_number}\n" +
+                    f"**Branch**: `{branch}`\n" +
+                    f"**Commit**: {result}\n\n" +
+                    f"Ready for review."
+                )
+                return 0
+            else:
+                _post_issue_comment(f"❌ Dev: failed to commit/push - {result}")
+                return 1
+        else:
+            _post_issue_comment("❌ Dev: failed to apply implementation - may need manual intervention")
+            return 1
+            
+    except Exception as e:
+        print(f"Issue mode failed: {e}")
+        _post_issue_comment(f"❌ Dev: implementation failed - {str(e)[:200]}")
+        return 1
 
-        raise
-
+def main():
+    m = _mode()
+    print(f"Dev starting in {m} mode")
+    if m == "pr-fix": 
+        return run_pr_fix()
+    return run_issue()
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

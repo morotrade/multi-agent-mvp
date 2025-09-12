@@ -34,10 +34,9 @@ jobs:
 
       - name: Run Analyzer
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Se usi Projects v2 con GraphQL richiedenti scope extra:
+          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-          # Project info (solo se lo script li usa davvero)
+          GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
           PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
@@ -50,3 +49,4 @@ jobs:
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: python .github/agents/analyzer.py
+

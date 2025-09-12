@@ -1,203 +1,473 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, re, httpx
-from utils import (
-    get_github_headers, call_llm_api, get_preferred_model,
-    set_project_single_select, add_item_to_project, get_issue_node_id,
-    resolve_project_tag, ensure_label_exists, add_labels_to_issue
-)
+"""
+AI Code Reviewer — PR-centric loop (PATCHED VERSION)
+- Real LLM integration with robust parsing and fallbacks
+- Sticky comment with anchors and stable sections
+- Policy gating after side-effects
+- Improved error handling and timeout management
+"""
+from __future__ import annotations
+import json, os, re, sys, time, typing as t
+import httpx
+from utils import call_llm_api, get_preferred_model
 
-REPO = os.environ["GITHUB_REPOSITORY"]
-PR_NUMBER = os.environ["PR_NUMBER"]  # string ok per API Issues/PR
+BASE = "https://api.github.com"
+GQL  = "https://api.github.com/graphql"
+STICKY_TAG_TPL = "<!-- AI-REVIEWER:PR-{n} -->"
+TIMEOUT_DEFAULT = 60
 
-# ------------------ HTTP helpers ------------------
-def gh_get(url, accept=None, timeout=60):
-    headers = get_github_headers()
-    if accept:
-        headers["Accept"] = accept
-    with httpx.Client(timeout=timeout) as client:
-        r = client.get(url, headers=headers)
-        r.raise_for_status()
-        return r
+def _token()->str:
+    tkn = os.getenv("GH_CLASSIC_TOKEN") or os.getenv("GITHUB_TOKEN")
+    if not tkn:
+        raise RuntimeError("Missing token (GH_CLASSIC_TOKEN/GITHUB_TOKEN)")
+    return tkn
 
-def gh_post(url, json=None, timeout=60):
-    with httpx.Client(timeout=timeout) as client:
-        r = client.post(url, headers=get_github_headers(), json=json)
-        r.raise_for_status()
-        return r
+def _headers(accept=True)->dict:
+    h = {"Authorization": f"Bearer {_token()}", "User-Agent":"ai-reviewer/loop"}
+    if accept: h["Accept"] = "application/vnd.github+json"
+    return h
 
-# ------------------ GH data fetch ------------------
-def get_pr_info():
-    url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}"
-    return gh_get(url).json()
+def _rest(method:str, path:str, **kw):
+    timeout = kw.pop('timeout', TIMEOUT_DEFAULT)
+    url = f"{BASE}{path}"
+    with httpx.Client(timeout=timeout) as c:
+        r = c.request(method, url, headers=_headers(), **kw)
+    if r.status_code>=400:
+        raise RuntimeError(f"REST {method} {path} -> {r.status_code}: {r.text[:300]}")
+    return r.json() if r.text else None
 
-def get_pr_diff_text():
-    url = f"https://api.github.com/repos/{REPO}/pulls/{PR_NUMBER}"
-    return gh_get(url, accept="application/vnd.github.v3.diff").text
+def _gql(query:str, variables:dict, timeout=TIMEOUT_DEFAULT):
+    with httpx.Client(timeout=timeout) as c:
+        r = c.post(GQL, headers=_headers(), json={"query":query, "variables":variables})
+    if r.status_code>=400:
+        raise RuntimeError(f"GraphQL HTTP {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    if "errors" in data:
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
+    return data["data"]
 
-def post_comment(body: str):
-    url = f"https://api.github.com/repos/{REPO}/issues/{PR_NUMBER}/comments"
-    gh_post(url, json={"body": body})
+def _event()->dict:
+    p = os.getenv("GITHUB_EVENT_PATH")
+    if p and os.path.exists(p):
+        return json.load(open(p, "r", encoding="utf-8"))
+    return {}
 
-def create_issue(title: str, body: str, labels):
-    url = f"https://api.github.com/repos/{REPO}/issues"
-    gh_post(url, json={"title": title, "body": body, "labels": labels})
+def _repo()->tuple[str,str]:
+    full = os.getenv("GITHUB_REPOSITORY","")
+    if "/" in full: 
+        o, r = full.split("/",1); return o, r
+    ev = _event()
+    return ev["repository"]["owner"]["login"], ev["repository"]["name"]
 
-def load_prompt(name: str) -> str:
-    # Preferisci .github/prompts/<name>.md, fallback a ./<name>.md
-    for path in (f".github/prompts/{name}.md", f"{name}.md"):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except FileNotFoundError:
-            continue
-    return f"# Prompt {name}\nAnalizza il codice seguendo le best practices."
+def _pr_number()->int:
+    if os.getenv("PR_NUMBER"):
+        return int(os.getenv("PR_NUMBER"))
+    ev = _event()
+    pr = ev.get("pull_request") or {}
+    return int(pr.get("number") or 0)
 
-# ------------------ Policy & findings ------------------
-def detect_policy(pr_json) -> str:
-    labels = [l["name"].lower() for l in pr_json.get("labels", [])]
-    if "policy:strict" in labels:
-        return "strict"
-    if "policy:lenient" in labels:
-        return "lenient"
+def _pr()->dict:
+    owner, repo = _repo()
+    num = _pr_number()
+    return _rest("GET", f"/repos/{owner}/{repo}/pulls/{num}")
+
+def _pr_files()->list[dict]:
+    """Get PR files with diff content"""
+    owner, repo = _repo()
+    num = _pr_number()
+    return _rest("GET", f"/repos/{owner}/{repo}/pulls/{num}/files")
+
+def _pr_issue_comments()->list[dict]:
+    owner, repo = _repo()
+    num = _pr_number()
+    return _rest("GET", f"/repos/{owner}/{repo}/issues/{num}/comments")
+
+def _post_comment(body:str)->dict:
+    owner, repo = _repo()
+    num = _pr_number()
+    return _rest("POST", f"/repos/{owner}/{repo}/issues/{num}/comments", json={"body":body})
+
+def _patch_comment(comment_id:int, body:str)->dict:
+    owner, repo = _repo()
+    return _rest("PATCH", f"/repos/{owner}/{repo}/issues/comments/{comment_id}", json={"body":body})
+
+def _add_labels(labels:list[str]):
+    owner, repo = _repo()
+    num = _pr_number()
+    _rest("POST", f"/repos/{owner}/{repo}/issues/{num}/labels", json={"labels":labels})
+
+def _remove_label(label:str):
+    owner, repo = _repo()
+    num = _pr_number()
+    try:
+        _rest("DELETE", f"/repos/{owner}/{repo}/issues/{num}/labels/{label}")
+    except Exception:
+        pass
+
+def _get_pr_labels()->set[str]:
+    """Get current PR labels"""
+    owner, repo = _repo()
+    num = _pr_number()
+    try:
+        labels_data = _rest("GET", f"/repos/{owner}/{repo}/issues/{num}/labels")
+        return {l["name"].lower() for l in labels_data}
+    except Exception:
+        return set()
+
+def _policy_from_labels()->str:
+    labels = _get_pr_labels()
+    if "policy:strict" in labels: return "strict"
+    if "policy:lenient" in labels: return "lenient"
     return "essential-only"
 
-def extract_findings(analysis_text: str):
-    """Estrae liste di bullet tra le intestazioni BLOCKER / IMPORTANT / SUGGESTION."""
-    def bullets_between(start_kw, end_kw=None):
-        patt = r"(?:^|\n)\s*"+start_kw+r".*?\n(?P<body>[\s\S]*?)" + (r"(?:\n\s*"+end_kw+r"\b|$)" if end_kw else r"$")
-        m = re.search(patt, analysis_text, flags=re.I)
-        if not m:
-            return []
-        lines = [ln.strip() for ln in m.group("body").splitlines()]
-        return [re.sub(r"^[-*\u2022]\s*", "", ln).strip() for ln in lines if ln.strip().startswith(("-", "*", "•"))]
+def _create_review_prompt(pr_data: dict, files_data: list[dict]) -> str:
+    """Create standardized prompt for LLM review"""
+    title = pr_data.get("title", "")
+    body = pr_data.get("body", "")
+    
+    # Collect diff content
+    diff_sections = []
+    for file_data in files_data:
+        filename = file_data.get("filename", "")
+        patch = file_data.get("patch", "")
+        if patch:
+            diff_sections.append(f"=== {filename} ===\n{patch}")
+    
+    diff_content = "\n\n".join(diff_sections) if diff_sections else "No changes detected"
+    
+    prompt = f"""# AI Code Reviewer Task
 
-    blockers = bullets_between(r"(?:\*\*)?BLOCKER:?")
-    importants = bullets_between(r"(?:\*\*)?IMPORTANT:?", r"(?:\*\*)?SUGGESTION:?")
+You are reviewing a Pull Request. Analyze the code changes and provide feedback in JSON format.
 
-    if re.search(r"BLOCKER[^:\n]*:\s*(?:none|nessuno|n/a)", analysis_text, re.I):
-        blockers = []
-    if re.search(r"IMPORTANT[^:\n]*:\s*(?:none|nessuno|n/a)", analysis_text, re.I):
-        importants = []
-    return blockers, importants
+## PR Details
+Title: {title}
+Description: {body}
 
-def should_fail(policy: str, blockers: list, importants: list) -> bool:
-    if policy == "lenient":
-        return False
-    if policy == "essential-only":
-        return len(blockers) > 0
-    if policy == "strict":
-        return (len(blockers) > 0) or (len(importants) > 0)
-    return False
+## Code Changes
+{diff_content[:50000]}  # Truncate if too long
 
-# ------------------ Main ------------------
-def main():
+## Instructions
+Analyze the changes and respond with ONLY a JSON object containing:
+
+```json
+{{
+  "blockers": <number>,
+  "importants": <number>, 
+  "suggestions": <number>,
+  "findings": [
+    {{
+      "level": "BLOCKER|IMPORTANT|SUGGESTION",
+      "file": "path/to/file",
+      "line": <number or null>,
+      "message": "Description of the issue",
+      "suggestion": "How to fix it"
+    }}
+  ],
+  "summary": "Brief overall assessment"
+}}
+```
+
+## Evaluation Criteria
+- BLOCKER: Critical issues that prevent merge (security, functionality breaking)
+- IMPORTANT: Significant issues that should be addressed (performance, maintainability)
+- SUGGESTION: Minor improvements or best practices
+
+Focus on:
+- Security vulnerabilities
+- Logic errors
+- Performance issues
+- Code quality and maintainability
+- Best practices adherence
+"""
+    return prompt
+
+def _parse_llm_response(raw_response: str) -> dict:
+    """Parse LLM response with robust fallbacks"""
     try:
-        print("🔎 Reviewer: start")
-        pr = get_pr_info()
-
-        branch = os.environ.get("GITHUB_HEAD_REF") or pr.get("head", {}).get("ref", "") or ""
-        pr_url = pr.get("html_url", "")
-        policy = detect_policy(pr)
-
-        # Estrai numero issue: da branch 'issue-<n>-' o da body 'Closes #<n>'
-        m = re.search(r"issue-(\d+)-", branch)
-        issue_num = int(m.group(1)) if m else None
-        if not issue_num:
-            m2 = re.search(r"(?i)\bcloses\s+#(\d+)\b", pr.get("body") or "")
-            issue_num = int(m2.group(1)) if m2 else None
-
-        # ---- Project & Tagging (opzionale) ----
-        project_id = os.environ.get("GITHUB_PROJECT_ID") or os.environ.get("GH_PROJECT_ID")
-        status_field_id = os.environ.get("PROJECT_STATUS_FIELD_ID")
-        status_inreview = os.environ.get("PROJECT_STATUS_INREVIEW_ID")
-
-        owner, repo = REPO.split("/")
-        # Prova a ricavare un project-tag dal body/titolo della PR
-        PROJECT_TAG = resolve_project_tag((pr.get("body") or "") + "\n" + (pr.get("title") or "")) or "project"
-
-        # Aggiorna Project: issue → In review
-        if issue_num and project_id and status_field_id and status_inreview:
-            try:
-                issue_node_id = get_issue_node_id(owner, repo, issue_num)
-                item_id = add_item_to_project(project_id, issue_node_id)  # idempotente
-                set_project_single_select(project_id, item_id, status_field_id, status_inreview)
-                print(f"📌 Issue #{issue_num} impostata su 'In review'")
-            except Exception as e:
-                print(f"⚠️ Project linkage (review) error: {e}")
-
-        # Etichetta PR con project tag
-        try:
-            if PROJECT_TAG:
-                ensure_label_exists(owner, repo, PROJECT_TAG, color="0E8A16", description="Project tag")
-                add_labels_to_issue(owner, repo, int(PR_NUMBER), [PROJECT_TAG])  # PR numerate come issues
-                print(f"🏷️ Project tag applicato alla PR: {PROJECT_TAG}")
-        except Exception as e:
-            print(f"⚠️ Impossibile applicare project tag alla PR: {e}")
-
-        # Log iniziale visibile in PR
-        post_comment(f"🧭 **AI Reviewer avviato** su PR #{PR_NUMBER}\n\n- Branch: `{branch}`\n- Policy: `{policy}`\n- PR: {pr_url}")
-
-        # Recupera diff PR
-        diff_text = get_pr_diff_text()
-        if not diff_text or len(diff_text.strip()) < 50:
-            post_comment("ℹ️ Nessun diff significativo da analizzare.")
-            print("no-diff")
-            return
-        if len(diff_text) > 800_000:
-            post_comment("⚠️ Diff molto grande; l'analisi potrebbe essere parziale. Considera di segmentare la PR.")
-            print("large-diff")
-
-        # Costruisci prompt e chiama LLM
-        prompt = load_prompt("reviewer") + f"\n\n## DIFF DA ANALIZZARE:\n\n```diff\n{diff_text}\n```\n\n## ANALISI:"
-        model = get_preferred_model("reviewer")
-        print("call LLM…")
-        analysis = call_llm_api(prompt, model=model)
-
-        # Posta l'analisi completa
-        post_comment(f"## 🤖 AI Code Review\n\n{analysis}\n\n---\n*Revisione automatica*")
-
-        # Estrai BLOCKER/IMPORTANT
-        blockers, importants = extract_findings(analysis)
-        print(f"found: blockers={len(blockers)} importants={len(importants)} policy={policy}")
-
-        # Se serve, apri Issue di fix per il Dev
-        need_fix_issue = should_fail(policy, blockers, importants)
-        if need_fix_issue:
-            checklist = ""
-            if blockers:
-                checklist += "### BLOCKER\n" + "\n".join(f"- [ ] {b}" for b in blockers) + "\n"
-            if policy == "strict" and importants:
-                checklist += "### IMPORTANT\n" + "\n".join(f"- [ ] {i}" for i in importants) + "\n"
-
-            body = (
-                f"Fix per **PR #{PR_NUMBER}** ({pr_url})\n\n"
-                f"**branch:** `{branch}`\n\n"
-                f"{checklist}\n"
-                f"---\n"
-                f"_Issue aperta automaticamente dal Reviewer. Etichetta: `bot:implement`_"
-            )
-            create_issue(
-                title=f"Fix findings from PR #{PR_NUMBER}",
-                body=body,
-                labels=["bot:implement"]
-            )
-            post_comment("📌 Creata Issue di fix con `bot:implement`. Il Dev Agent prenderà in carico le patch.")
-
-        # Fallisci o passa il job secondo policy
-        if need_fix_issue:
-            print("fail by policy")
-            raise SystemExit(1)
+        # Try to extract JSON block
+        json_match = re.search(r'```json\s*(.*?)\s*```', raw_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
         else:
-            print("pass by policy")
-
+            # Try raw JSON
+            json_str = raw_response.strip()
+        
+        data = json.loads(json_str)
+        
+        # Validate and normalize
+        result = {
+            "blockers": int(data.get("blockers", 0)),
+            "importants": int(data.get("importants", 0)),
+            "suggestions": int(data.get("suggestions", 0)),
+            "findings": data.get("findings", []),
+            "summary": str(data.get("summary", "No summary provided"))
+        }
+        
+        return result
+        
     except Exception as e:
-        print(f"error: {e}")
-        try:
-            post_comment(f"❌ **Errore Reviewer**\n\n{e}")
-        except Exception:
-            pass
-        raise
+        print(f"⚠️ JSON parsing failed: {e}")
+        # Fallback: extract counts heuristically
+        blockers = len(re.findall(r'BLOCKER', raw_response, re.I))
+        importants = len(re.findall(r'IMPORTANT', raw_response, re.I))
+        suggestions = len(re.findall(r'SUGGESTION', raw_response, re.I))
+        
+        return {
+            "blockers": blockers,
+            "importants": importants, 
+            "suggestions": suggestions,
+            "findings": [{"level": "IMPORTANT", "file": "", "line": None, 
+                         "message": "LLM response parsing failed", 
+                         "suggestion": "Check LLM configuration"}],
+            "summary": f"Parsing error occurred. Raw response available for manual review."
+        }
+
+def _format_findings_markdown(findings: list[dict]) -> str:
+    """Format findings as markdown"""
+    if not findings:
+        return "_No specific issues found._"
+    
+    sections = {"BLOCKER": [], "IMPORTANT": [], "SUGGESTION": []}
+    
+    for finding in findings:
+        level = finding.get("level", "SUGGESTION").upper()
+        if level not in sections:
+            level = "SUGGESTION"
+            
+        file_info = finding.get("file", "")
+        line_info = f":{finding['line']}" if finding.get("line") else ""
+        location = f"`{file_info}{line_info}`" if file_info else "General"
+        
+        message = finding.get("message", "No message")
+        suggestion = finding.get("suggestion", "")
+        
+        item = f"**{location}**: {message}"
+        if suggestion:
+            item += f"\n  *Suggestion*: {suggestion}"
+            
+        sections[level].append(item)
+    
+    markdown_parts = []
+    for level in ["BLOCKER", "IMPORTANT", "SUGGESTION"]:
+        if sections[level]:
+            emoji = {"BLOCKER": "🚫", "IMPORTANT": "⚠️", "SUGGESTION": "💡"}[level]
+            markdown_parts.append(f"\n#### {emoji} {level}\n" + "\n".join(f"- {item}" for item in sections[level]))
+    
+    return "\n".join(markdown_parts)
+
+def _sticky_comment_body(result: dict, timestamp: str = None) -> str:
+    """Create sticky comment body with anchors"""
+    prn = _pr_number()
+    tag = STICKY_TAG_TPL.format(n=prn)
+    timestamp = timestamp or time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    
+    blockers = result["blockers"]
+    importants = result["importants"] 
+    suggestions = result["suggestions"]
+    findings_md = _format_findings_markdown(result["findings"])
+    summary = result["summary"]
+    
+    header = f"""### 🤖 AI Code Review
+{tag}
+<!-- reviewer:sticky:start -->
+
+**Last Updated**: {timestamp}
+
+#### 📊 Summary
+{summary}
+
+#### 🎯 Issue Counts
+- **🚫 BLOCKER**: {blockers}
+- **⚠️ IMPORTANT**: {importants}  
+- **💡 SUGGESTION**: {suggestions}
+"""
+    
+    findings_section = f"""
+#### 📝 Detailed Findings
+{findings_md}
+"""
+    
+    footer = """
+---
+> 🔄 **Auto-Review Loop**: This comment updates automatically when you push changes to this branch.  
+> 🏷️ **Labels**: `need-fix` = blockers to resolve, `ready-to-merge` = all clear!
+
+<!-- reviewer:sticky:end -->"""
+    
+    body = header + findings_section + footer
+    if len(body) > 65000:
+        body = body[:64500] + "\n\n... (truncated by reviewer)\n" + footer
+    return body
+
+def _upsert_sticky_comment(body:str):
+    """Update existing sticky comment or create new one"""
+    prn = _pr_number()
+    tag = STICKY_TAG_TPL.format(n=prn)
+    existing = None
+    
+    for c in _pr_issue_comments():
+        if tag in c.get("body",""):
+            existing = c
+            break
+    
+    if existing:
+        _patch_comment(existing["id"], body)
+        print("📝 Updated sticky comment")
+    else:
+        _post_comment(body)
+        print("📝 Created sticky comment")
+
+def _issue_node_id(issue_number: int) -> str:
+    owner, repo = _repo()
+    data = _gql("""
+    query($owner:String!,$repo:String!,$num:Int!){
+      repository(owner:$owner,name:$repo){
+        issue(number:$num){ id }
+      }
+    }""", {"owner":owner,"repo":repo,"num":issue_number})
+    return data["repository"]["issue"]["id"]
+
+def _add_item_to_project(project_id: str, content_node_id: str) -> str:
+    data = _gql("""
+    mutation($p:ID!,$c:ID!){
+      addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{id} }
+    }""", {"p":project_id,"c":content_node_id})
+    return data["addProjectV2ItemById"]["item"]["id"]
+
+def _set_project_single_select(project_id: str, item_id: str, field_id: str, option_id: str):
+    _gql("""
+    mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){
+      updateProjectV2ItemFieldValue(input:{
+        projectId:$p,itemId:$i,fieldId:$f,
+        value:{singleSelectOptionId:$o}
+      }){ projectV2Item{id} }
+    }""", {"p":project_id,"i":item_id,"f":field_id,"o":option_id}, timeout=40)
+
+def _ensure_in_review_status(source_issue_number:int):
+    """Set Project status to 'In review' with safe error handling"""
+    proj = os.getenv("GH_PROJECT_ID") or os.getenv("GITHUB_PROJECT_ID")
+    field = os.getenv("PROJECT_STATUS_FIELD_ID") 
+    inrev = os.getenv("PROJECT_STATUS_INREVIEW_ID")
+    
+    if not (proj and field and inrev):
+        print("ℹ️ Project integration disabled (missing env vars)")
+        return
+        
+    try:
+        node_id = _issue_node_id(source_issue_number)
+        item_id = _add_item_to_project(proj, node_id)
+        _set_project_single_select(proj, item_id, field, inrev)
+        print("📌 Project status set to 'In review'")
+    except Exception as e:
+        print(f"⚠️ Project update failed (non-blocking): {e}")
+
+def _source_issue_from_pr_body()->int|None:
+    """Extract issue number from PR body 'Closes #N' patterns"""
+    body = _pr().get("body") or ""
+    m = re.search(r"(?:close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)", body, re.I)
+    return int(m.group(1)) if m else None
+
+def _run_llm_review() -> dict:
+    """Run LLM review with retry logic"""
+    try:
+        pr_data = _pr()
+        files_data = _pr_files()
+        
+        prompt = _create_review_prompt(pr_data, files_data)
+        model = get_preferred_model("reviewer")
+        
+        print(f"🤖 Running LLM review with model: {model}")
+        
+        # Call LLM with timeout and retry
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                raw_response = call_llm_api(prompt, model=model, max_tokens=4000)
+                result = _parse_llm_response(raw_response)
+                
+                print(f"✅ LLM review completed: {result['blockers']} blockers, {result['importants']} important, {result['suggestions']} suggestions")
+                return result
+                
+            except Exception as e:
+                if attempt < max_retries:
+                    print(f"⚠️ LLM attempt {attempt + 1} failed: {e}, retrying...")
+                    time.sleep(2)
+                else:
+                    raise
+        
+    except Exception as e:
+        print(f"❌ LLM review failed: {e}")
+        # Fallback result
+        return {
+            "blockers": 0,
+            "importants": 1, 
+            "suggestions": 0,
+            "findings": [{
+                "level": "IMPORTANT",
+                "file": "",
+                "line": None,
+                "message": f"AI review failed: {str(e)[:100]}",
+                "suggestion": "Manual review recommended"
+            }],
+            "summary": "Automated review unavailable - manual review required"
+        }
+
+def main():
+    print("🔎 Reviewer: start (patched version)")
+    prn = _pr_number()
+    if not prn:
+        print("No PR number; exit 0")
+        return 0
+
+    # Run LLM analysis
+    result = _run_llm_review()
+    
+    blockers = result["blockers"]
+    importants = result["importants"]
+    suggestions = result["suggestions"]
+
+    # Side effects BEFORE policy gating
+    
+    # 1. Always update sticky comment
+    sticky_body = _sticky_comment_body(result)
+    _upsert_sticky_comment(sticky_body)
+
+    # 2. Project status update (best-effort)
+    try:
+        src = _source_issue_from_pr_body()
+        if src:
+            _ensure_in_review_status(src)
+    except Exception as e:
+        print(f"⚠️ Project update failed: {e}")
+
+    # 3. Apply labels based on policy
+    policy = _policy_from_labels()
+    must_fix = (blockers > 0) or (policy == "strict" and importants > 0)
+    
+    if must_fix:
+        _add_labels(["need-fix"])
+        _remove_label("ready-to-merge")
+        print(f"🏷️ need-fix applied (policy={policy}, blockers={blockers}, importants={importants})")
+    else:
+        _remove_label("need-fix")
+        _add_labels(["ready-to-merge"]) 
+        print(f"🏷️ ready-to-merge applied (policy={policy})")
+
+    # 4. Policy gating for exit code
+    if policy == "lenient":
+        print("🟢 Policy: lenient - always pass")
+        return 0
+    elif policy == "essential-only":
+        exit_code = 1 if blockers > 0 else 0
+        print(f"🟡 Policy: essential-only - exit {exit_code} (blockers={blockers})")
+        return exit_code
+    elif policy == "strict":
+        exit_code = 1 if (blockers > 0 or importants > 0) else 0
+        print(f"🔴 Policy: strict - exit {exit_code} (blockers={blockers}, importants={importants})")
+        return exit_code
+    
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
