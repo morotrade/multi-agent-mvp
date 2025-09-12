@@ -82,9 +82,9 @@ def add_to_project_if_available(issue_number: int, status_option_id: str | None)
         return  # project integration disabled
     try:
         node_id = get_issue_node_id(OWNER, REPO_NAME, issue_number)
-        add_item_to_project(PROJECT_ID, node_id)
+        item_id = add_item_to_project(PROJECT_ID, node_id)
         if STATUS_FIELD_ID and status_option_id:
-            set_project_single_select(PROJECT_ID, node_id, STATUS_FIELD_ID, status_option_id)
+            set_project_single_select(PROJECT_ID, item_id, STATUS_FIELD_ID, status_option_id)
     except Exception as e:
         post_issue_comment(
             OWNER, REPO_NAME, ISSUE_NUMBER,
