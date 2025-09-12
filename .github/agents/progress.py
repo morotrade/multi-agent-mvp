@@ -241,7 +241,7 @@ def main():
         return 0
 
     issue_body = closed_issue.get("body", "")
-    parent_match = re.search(r"(?i)\*\*Parent\*\*:\s*#(\d+)\b|Parent:\s*#(\d+)\b", issue_body)
+    parent_match = re.search(r"\*\*Parent\*\*\s*:\s*#(\d+)\b|Parent\s*:\s*#(\d+)\b", issue_body or "", re.I)
     
     if not parent_match:
         print("Info: Closed issue has no parent reference, no progression needed")
