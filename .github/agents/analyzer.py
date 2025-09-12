@@ -240,6 +240,186 @@ def create_enhanced_prompt(issue_analysis: dict) -> str:
     
     return f"{base_prompt}\n{context_section}"
 
+def create_detailed_report(plan: dict, issue_analysis: dict) -> str:
+    """Create detailed pre-execution report"""
+    
+    # Extract plan components
+    policy = plan.get("policy", "essential-only")
+    complexity = plan.get("complexity", issue_analysis["detected_complexity"])
+    sprints = plan.get("sprints", [])
+    tasks = plan.get("tasks", [])
+    
+    report_sections = []
+    
+    # Header
+    report_sections.append("# 🎯 PIANO D'ATTACCO - Analisi Pre-Esecuzione\n")
+    
+    # 1. Analisi della richiesta
+    report_sections.append("## 📋 Analisi della Richiesta")
+    report_sections.append(f"**Titolo**: {issue_analysis['title']}")
+    report_sections.append(f"**Complessità Rilevata**: {complexity.upper()}")
+    report_sections.append(f"**Policy di Review**: {policy}")
+    
+    # Capability indicators
+    capabilities = []
+    if issue_analysis['has_acceptance_criteria']:
+        capabilities.append("✅ Criteri di accettazione definiti")
+    else:
+        capabilities.append("⚠️ Criteri di accettazione da definire")
+        
+    if issue_analysis['has_file_paths']:
+        capabilities.append("✅ File path specificati")
+    else:
+        capabilities.append("📁 File path da determinare")
+        
+    if issue_analysis['has_dependencies']:
+        capabilities.append("🔗 Dipendenze identificate")
+    else:
+        capabilities.append("🆓 Nessuna dipendenza esterna")
+    
+    report_sections.append("\n".join(capabilities))
+    report_sections.append("")
+    
+    # 2. Valutazione complessità con dettagli
+    report_sections.append("## 🧠 Valutazione della Complessità")
+    
+    complexity_details = {
+        "low": "Implementazione semplice, rischi minimi, principalmente configurazione o fix",
+        "medium": "Feature moderata, richiede design e test, rischi controllabili", 
+        "high": "Refactor significativo, alto impatto, richiede planning accurato"
+    }
+    
+    report_sections.append(f"**Grado**: {complexity.upper()}")
+    report_sections.append(f"**Valutazione**: {complexity_details.get(complexity, 'Complessità non classificata')}")
+    
+    # Estimate total effort
+    total_hours = sum(task.get("estimated_hours", 4) for task in tasks)
+    report_sections.append(f"**Effort Stimato**: ~{total_hours} ore totali")
+    report_sections.append("")
+    
+    # 3. Strategia di implementazione
+    report_sections.append("## 🏗️ Strategia di Implementazione")
+    
+    if sprints:
+        sprint = sprints[0]
+        report_sections.append(f"**Sprint**: {sprint.get('name', 'Sprint 1')}")
+        report_sections.append(f"**Obiettivo**: {sprint.get('goal', 'Implementazione base')}")
+        report_sections.append(f"**Durata**: {sprint.get('duration', 'TBD')}")
+    else:
+        report_sections.append("**Strategia**: Implementazione diretta senza sprint dedicati")
+    
+    # Identify file structure
+    all_paths = []
+    for task in tasks:
+        all_paths.extend(task.get("paths", []))
+    
+    if all_paths:
+        unique_paths = list(set(all_paths))
+        report_sections.append(f"**File Interessati**: {len(unique_paths)} file")
+        report_sections.append("```")
+        for path in sorted(unique_paths)[:10]:  # Limit to first 10
+            report_sections.append(f"  {path}")
+        if len(unique_paths) > 10:
+            report_sections.append(f"  ... e altri {len(unique_paths) - 10} file")
+        report_sections.append("```")
+    report_sections.append("")
+    
+    # 4. Piano di segmentazione
+    report_sections.append("## 📊 Piano di Segmentazione")
+    report_sections.append(f"**Numero di Task**: {len(tasks)}")
+    
+    if len(tasks) == 1:
+        report_sections.append("**Rationale**: Task singolo, complessità gestibile in un'unica implementazione")
+    elif len(tasks) <= 3:
+        report_sections.append("**Rationale**: Segmentazione minima per separare responsabilità logiche")
+    elif len(tasks) <= 6:
+        report_sections.append("**Rationale**: Suddivisione moderata per componenti indipendenti")
+    else:
+        report_sections.append("**Rationale**: Segmentazione estesa per gestire complessità elevata")
+    
+    # Task priority distribution
+    priorities = {}
+    for task in tasks:
+        priority = task.get("priority", "medium")
+        priorities[priority] = priorities.get(priority, 0) + 1
+    
+    if priorities:
+        priority_text = ", ".join([f"{count} {priority}" for priority, count in priorities.items()])
+        report_sections.append(f"**Distribuzione Priorità**: {priority_text}")
+    
+    report_sections.append("")
+    
+    # 5. Task breakdown dettagliato
+    report_sections.append("## 📝 Task Breakdown Dettagliato")
+    
+    for i, task in enumerate(tasks, 1):
+        title = task.get("title", f"Task {i}")
+        priority = task.get("priority", "medium")
+        hours = task.get("estimated_hours", 4)
+        depends = task.get("depends_on", [])
+        
+        report_sections.append(f"### {i}. {title}")
+        report_sections.append(f"**Priorità**: {priority.upper()} | **Effort**: ~{hours}h")
+        
+        if depends:
+            report_sections.append(f"**Dipende da**: {', '.join(depends)}")
+        
+        description = task.get("description", "Nessuna descrizione fornita")
+        report_sections.append(f"**Cosa farà**: {description}")
+        
+        # Acceptance criteria
+        acceptance = task.get("acceptance", [])
+        if acceptance:
+            report_sections.append("**Criteri di successo**:")
+            for criterion in acceptance:
+                report_sections.append(f"  - {criterion}")
+        
+        # Deliverables
+        paths = task.get("paths", [])
+        if paths:
+            report_sections.append("**Deliverable**:")
+            for path in paths:
+                report_sections.append(f"  - `{path}`")
+        
+        report_sections.append("")
+    
+    # 6. Sequenza di esecuzione e rischi
+    report_sections.append("## ⚡ Sequenza di Esecuzione")
+    report_sections.append("**Ordine Pianificato**:")
+    for i, task in enumerate(tasks, 1):
+        title = task.get("title", f"Task {i}")
+        report_sections.append(f"  {i}. {title}")
+    
+    report_sections.append("")
+    report_sections.append("## ⚠️ Rischi e Mitigazioni")
+    
+    # Auto-detect potential risks
+    risks = []
+    if complexity == "high":
+        risks.append("🔴 Complessità elevata - Monitoraggio frequente necessario")
+    if len(tasks) > 5:
+        risks.append("🟡 Segmentazione estesa - Rischio di dipendenze nascoste")
+    if not issue_analysis['has_acceptance_criteria']:
+        risks.append("🟡 Criteri vaghi - Possibili iterazioni di chiarimento")
+    
+    # Check for complex dependencies
+    has_dependencies = any(task.get("depends_on") for task in tasks)
+    if has_dependencies:
+        risks.append("🟡 Dipendenze tra task - Sequenza da rispettare rigorosamente")
+    
+    if not risks:
+        risks.append("🟢 Nessun rischio significativo identificato")
+    
+    report_sections.extend(risks)
+    report_sections.append("")
+    
+    # Footer
+    report_sections.append("---")
+    report_sections.append("**📅 Next Steps**: L'analyzer procederà con la creazione automatica dei task e l'avvio del primo task in coda.")
+    report_sections.append("**🔄 Feedback**: Commenta questo issue per suggerimenti prima dell'esecuzione automatica.")
+    
+    return "\n".join(report_sections)
+
 # ---------- Main Function ----------
 def main():
     print("Analyzer: Enhanced version starting...")
@@ -296,13 +476,20 @@ def main():
             raise Exception(f"LLM returned error: {raw_response[:200]}")
             
         plan = parse_llm_json(raw_response)
-        print("Plan generated and validated")
-        
+        print("Plan generated and validated")    
     except Exception as e:
         error_msg = f"Plan generation failed: {e}"
         print(error_msg)
         post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, error_msg)
         return 1
+    
+    # POST DETAILED REPORT BEFORE CREATING TASKS
+    try:
+        detailed_report = create_detailed_report(plan, issue_analysis)
+        post_issue_comment(OWNER, REPO_NAME, ISSUE_NUMBER, detailed_report)
+        print("Detailed execution plan posted")
+    except Exception as e:
+        print(f"Failed to post detailed report: {e}")
 
     # Extract plan components
     policy = plan.get("policy", "essential-only")

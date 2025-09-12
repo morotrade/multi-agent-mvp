@@ -1,36 +1,30 @@
-﻿### Goal
-Create a minimal Python package `src/calc` with basic arithmetic ops and a tiny CLI.
+﻿### Project Tag
+project: math
+## Description
+Create a lightweight math utility module that provides basic arithmetic operations for use in other projects.
 
-### Scope & Files
-- Create:
-  - `src/calc/__init__.py`
-  - `src/calc/ops.py`  (functions: add(a,b), sub(a,b), mul(a,b), div(a,b) with ZeroDivisionError)
-  - `src/calc/__main__.py` (CLI: `python -m calc 2 + 3` prints `5`)
-  - `tests/test_ops.py` (unit tests covering normal cases and division by zero)
-- Update:
-  - `README.md` with a short “Install & Usage” section describing the CLI and Python usage.
+## Acceptance Criteria
+- Function to add two numbers
+- Function to multiply two numbers  
+- Basic input validation
+- Simple test to verify functions work
+- Documentation with usage example
 
-### Requirements
-- Python 3.11+, type hints + docstrings.
-- Clean, minimal, focused change set. **Do not edit** `.github/**`.
-- Keep code simple and readable; no external deps.
-- Include tests that show expected behavior and edge cases (0, negatives, ZeroDivisionError).
-- CLI must support: `+`, `-`, `x` (or `*`), `/`. Print result and exit code 0; on invalid input, non-zero exit and helpful message.
+## Files to create
+- \`math_utils.py\` - main utility functions
+- \`test_math_utils.py\` - basic tests
+- \`README.md\` - usage documentation
 
-### Acceptance Criteria
-- Running `python -m calc 7 / 2` prints `3.5`.
-- Running `python -m calc 4 / 0` exits non-zero and prints an error.
-- `tests/test_ops.py` passes locally (conceptually; CI not required).
-- README shows how to run CLI and import `calc.ops`.
+## Dependencies
+- No external dependencies
+- Use Python standard library only
 
-### Reviewer Policy
-essential-only (BLOCKERs must be fixed before merge; IMPORTANT/SUGGESTION optional)
+## Scope & Segmentation Guidelines
+**IMPORTANT FOR ANALYZER**: This is a simple, focused project. 
+- Create maximum 3-4 logical tasks
+- Group related activities together (don't create separate tasks for each function)
+- Suggested segmentation: (1) Core implementation, (2) Testing, (3) Documentation
+- Avoid micro-tasks like 'create __init__.py' or 'add single function'
+- Keep tasks substantial and meaningful
 
-### IMPORTANT for the LLM
-- Output must be a single **unified diff** fenced in ```diff including `--- a/...` and `+++ b/...` headers.
-- Modify only the files listed above.
-- Do not touch `.github` or workflow files.
-
-### Project Tag
-project: calc_v1
-
+This is a workflow verification test - prioritize logical task grouping over granular breakdown."
