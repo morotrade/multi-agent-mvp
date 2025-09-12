@@ -6,17 +6,17 @@ on:
 
 concurrency:
   group: dev-${{ github.event.issue.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   implement:
     if: contains(toJson(github.event.issue.labels), 'bot:implement')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
-      issues: read
+      issues: write
 
     steps:
       - name: Checkout code
@@ -30,58 +30,31 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install deps
+        run: pip install httpx openai anthropic google-generativeai
+
       - name: Configure Git identity
         run: |
           git config user.name "ai-dev-bot"
           git config user.email "ai-dev-bot@users.noreply.github.com"
 
-      - name: Install dependencies
-        run: pip install httpx openai anthropic google-generativeai
-
       - name: Run AI Developer
-        # FIX 2: Blocco ENV unificato da aggiungere a TUTTI i workflow (analyze.yml, dev.yml, reviewer.yml, progress.yml)
-# Sostituisci il blocco env: esistente con questo blocco completo
-
         env:
-          # GitHub tokens
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Se usi Projects v2 con GraphQL richiedenti scope extra:
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-
-          # Mapping al nome che i .py si aspettano
+          # Project info (solo se lo script li usa davvero)
           GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-
-          # Campi Project (già creati nei tuoi Secrets)
-          PROJECT_STATUS_FIELD_ID:       ${{ secrets.PROJECT_STATUS_FIELD_ID }}
-          PROJECT_STATUS_BACKLOG_ID:     ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
-          PROJECT_STATUS_INPROGRESS_ID:  ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
-          PROJECT_STATUS_INREVIEW_ID:    ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
-          PROJECT_STATUS_DONE_ID:        ${{ secrets.PROJECT_STATUS_DONE_ID }}
-
-          # (Opzionali se li usi in analyzer/progress)
-          PROJECT_PRIORITY_FIELD_ID:     ${{ secrets.PROJECT_PRIORITY_FIELD_ID }}
-          PROJECT_PRIORITY_P0_ID:        ${{ secrets.PROJECT_PRIORITY_P0_ID }}
-          PROJECT_PRIORITY_P1_ID:        ${{ secrets.PROJECT_PRIORITY_P1_ID }}
-          PROJECT_PRIORITY_P2_ID:        ${{ secrets.PROJECT_PRIORITY_P2_ID }}
-          PROJECT_SIZE_FIELD_ID:         ${{ secrets.PROJECT_SIZE_FIELD_ID }}
-          PROJECT_SIZE_XS_ID:            ${{ secrets.PROJECT_SIZE_XS_ID }}
-          PROJECT_SIZE_S_ID:             ${{ secrets.PROJECT_SIZE_S_ID }}
-          PROJECT_SIZE_M_ID:             ${{ secrets.PROJECT_SIZE_M_ID }}
-          PROJECT_SIZE_L_ID:             ${{ secrets.PROJECT_SIZE_L_ID }}
-          PROJECT_SIZE_XL_ID:            ${{ secrets.PROJECT_SIZE_XL_ID }}
-          PROJECT_ITERATION_FIELD_ID:    ${{ secrets.PROJECT_ITERATION_FIELD_ID }}
-          PROJECT_ITERATION_1_ID:        ${{ secrets.PROJECT_ITERATION_1_ID }}
-          PROJECT_ITERATION_2_ID:        ${{ secrets.PROJECT_ITERATION_2_ID }}
-          PROJECT_ITERATION_3_ID:        ${{ secrets.PROJECT_ITERATION_3_ID }}
-
-          # LLM APIs (usa quelli che hai davvero)
+          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
+          PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
+          PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
+          PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
+          PROJECT_STATUS_DONE_ID: ${{ secrets.PROJECT_STATUS_DONE_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-          # Dati dell'issue/PR (specifici per workflow)
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: python .github/agents/dev.py
+
+        

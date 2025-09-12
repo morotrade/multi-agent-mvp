@@ -32,5 +32,5 @@ essential-only (BLOCKERs must be fixed before merge; IMPORTANT/SUGGESTION option
 - Do not touch `.github` or workflow files.
 
 ### Project Tag
-project_tag: calc_v1
+project: calc_v1
 
