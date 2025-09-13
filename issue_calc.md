@@ -1,5 +1,6 @@
-﻿### Project Tag
+﻿## Project Tag
 project: math
+
 ## Description
 Create a lightweight math utility module that provides basic arithmetic operations for use in other projects.
 
