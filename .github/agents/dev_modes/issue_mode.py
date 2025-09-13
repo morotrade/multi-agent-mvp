@@ -42,11 +42,11 @@ class IssueMode:
             
             # Generate implementation diff
             diff = self._generate_implementation_diff(project_root, issue_title, issue_body)
-            if not diff or "diff --git " not in diff:
+            
+            if not diff or not diff.strip():
                 self.github.post_comment(issue_number,
-                    "ℹ️ Nessuna modifica proposta dall'LLM (nessun blocco `diff --git`). "
-                    "Nulla da applicare.")
-                print("ℹ️ No-op: empty/invalid diff")
+                    "ℹ️ Nessuna modifica proposta dall'LLM (diff vuoto). Nulla da applicare.")
+                print("ℹ️ No-op: empty diff")
                 return 0
             
             # Create branch and implement
@@ -70,7 +70,15 @@ class IssueMode:
             
         except Exception as e:
             error_msg = self.diff_processor.sanitize_error_for_comment(str(e))
-            self.github.post_comment(issue_number, f"❌ Issue implementation failed:\n\n```\n{error_msg}\n```")
+            preview = ""
+            try:
+                preview = self.diff_processor.last_response_snippet()
+            except Exception:
+                pass
+            comment = f"❌ Issue implementation failed:\n\n```\n{error_msg}\n```"
+            if preview:
+                comment += f"\n\n<details><summary>LLM raw output (truncated)</summary>\n\n```text\n{preview}\n```\n</details>"
+            self.github.post_comment(issue_number, comment)
             print(f"❌ Issue mode failed: {e}")
             return 1
     

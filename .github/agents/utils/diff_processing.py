@@ -16,7 +16,7 @@ def extract_single_diff(markdown_text: str) -> str:
     
     # Try to find diff blocks
     patterns = [
-        r"```diff\s*([\s\S]*?)```",  # Explicit diff blocks
+        r"```(?:diff|patch)\s*([\s\S]*?)```",  # Explicit diff/patch blocks
         r"```\s*(---[\s\S]*?\+\+\+[\s\S]*?)```",  # Generic blocks with diff headers
         r"```\s*([\s\S]*?)```"  # Any code blocks
     ]
@@ -48,8 +48,8 @@ def extract_single_diff(markdown_text: str) -> str:
     if not re.search(r"^--- (?:a/|/dev/null)", diff, flags=re.M):
         raise Exception("Invalid diff format: must start with '--- a/' or '--- /dev/null'")
     
-    if not re.search(r"^\+\+\+ b/", diff, flags=re.M):
-        raise Exception("Invalid diff format: must contain '+++ b/' headers")
+    if not re.search(r"^\+\+\+ (?:b/|/dev/null)", diff, flags=re.M):
+        raise Exception("Invalid diff format: must contain '+++ b/' (or '+++ /dev/null') headers")
     
     if not re.search(r"^@@.*@@", diff, flags=re.M):
         raise Exception("Invalid diff format: must contain at least one hunk header '@@'")

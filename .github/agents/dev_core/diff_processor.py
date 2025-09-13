@@ -24,7 +24,8 @@ class DiffProcessor:
         self.model = model or self._get_default_model()
         self.max_tokens = max_tokens
         self.temperature = temperature
-        
+        self._last_raw_response: str = ""
+                
         # System prompt ensuring unified diff output
         self.system_prompt = """You are an expert software engineer bot.
 You MUST output exactly ONE unified diff (GNU unified format) inside a single fenced block (```diff ... ```).
@@ -63,8 +64,16 @@ Do not include explanations outside the fenced block."""
                 "LLM returned empty/invalid content. Expected ONE ```diff ...``` block with unified diff."
             )
         
-        # Extract single diff block from response
-        diff = extract_single_diff(raw_response)
+        # store for diagnostics
+        self._last_raw_response = raw_response
+        # Extract single diff block from response (with diagnostics on failure)
+        try:
+            diff = extract_single_diff(raw_response)
+        except Exception as e:
+            preview = (raw_response or "")[:1200].replace("@", "＠")
+            print("⚠️ LLM raw preview (truncated to 1200 chars):\n" + preview)
+            raise
+        
         if not diff.strip():
             raise RuntimeError(
                 "Empty diff parsed from LLM response. Expected valid unified diff format."
@@ -121,3 +130,8 @@ Do not include explanations outside the fenced block."""
             sanitized = sanitized[:2000] + "... (truncated)"
         
         return sanitized
+    
+    def last_response_snippet(self, limit: int = 1200) -> str:
+        """Sanitized, truncated preview of last LLM output (for comments)."""
+        snippet = (self._last_raw_response or "")[:limit]
+        return snippet.replace("@", "＠")
