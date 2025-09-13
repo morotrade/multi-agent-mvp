@@ -1,35 +1,54 @@
-name: Next Task Progressor
+name: AI Progressor
 
 on:
+  pull_request_review:
+    types: [submitted]
   pull_request:
     types: [closed]
+  workflow_dispatch: {}
+
+concurrency:
+  group: progress-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
-  next-task:
-    if: github.event.pull_request.merged == true
+  progress:
+    # Esegui su APPROVED o su PR merged, o manuale
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
-
+      pull-requests: write     # commenti su PR (via /issues)
+      issues: write            # commenti/labels su Issue
+      repository-projects: write  # se vuoi aggiornare Project con GITHUB_TOKEN
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
-        run: pip install httpx
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f .github/agents/requirements.txt ]; then pip install -r .github/agents/requirements.txt; fi
+          pip install httpx
 
       - name: Run progressor
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Facoltativo: PAT classico per Project V2 (org/repo projects)
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Gate auto-merge solo quando evento è una review APPROVED
+          AUTO_MERGE_PR: ${{ github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && 'true' || 'false' }}
+          AUTO_MERGE_METHOD: squash
+          # Status field + opzioni Project V2 (facoltativo)
           GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
@@ -37,8 +56,4 @@ jobs:
           PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
           PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
           PROJECT_STATUS_DONE_ID: ${{ secrets.PROJECT_STATUS_DONE_ID }}
-          REPO: ${{ github.repository }}
         run: python .github/agents/progress.py
-
-
-        

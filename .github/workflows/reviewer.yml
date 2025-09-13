@@ -1,48 +1,57 @@
-﻿name: AI Code Reviewer
+﻿name: AI Reviewer
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, reopened, synchronize, labeled, edited, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch: {}
 
 concurrency:
-  group: reviewer-${{ github.event.pull_request.number }}
+  group: reviewer-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
-
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write   # crea/aggiorna commenti, applica label
+      issues: write          # se servisse commentare issue collegate
+      # repository-projects: write  # SOLO se vuoi aggiornare Project V2 con GITHUB_TOKEN
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: '3.11'
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f .github/agents/requirements.txt ]; then pip install -r .github/agents/requirements.txt; fi
+          pip install httpx
 
-      - name: Install dependencies
-        run: pip install httpx openai anthropic google-generativeai
-
-      - name: Run AI Reviewer
+      - name: Run reviewer
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Facoltativo: PAT classico per Project V2 (org/repo projects)
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-          GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
-          PROJECT_STATUS_BACKLOG_ID: ${{ secrets.PROJECT_STATUS_BACKLOG_ID }}
-          PROJECT_STATUS_INPROGRESS_ID: ${{ secrets.PROJECT_STATUS_INPROGRESS_ID }}
-          PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
-          PROJECT_STATUS_DONE_ID: ${{ secrets.PROJECT_STATUS_DONE_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Policy default tramite label sul PR (policy:strict|lenient|essential-only)
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Enforce path root (0/1)
+          ENFORCE_PROJECT_ROOT: ${{ vars.ENFORCE_PROJECT_ROOT || '0' }}
+          # Project V2 (opzionale, se vuoi set 'In Review' all'issue sorgente)
+          GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
+          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
+          PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}
+          PROJECT_STATUS_INREVIEW_ID: ${{ secrets.PROJECT_STATUS_INREVIEW_ID }}
+          # (opzionale) Root base/tag per il detector
+          PROJECT_ROOT_BASE: ${{ vars.PROJECT_ROOT_BASE || 'projects' }}
+          PROJECT_ROOT_TAG:  ${{ vars.PROJECT_ROOT_TAG  || 'project' }}
         run: python .github/agents/reviewer.py

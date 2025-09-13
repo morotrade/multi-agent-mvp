@@ -1,84 +1,80 @@
 ﻿name: AI Developer
 
 on:
-  # Issue mode: labeled with bot:implement
   issues:
-    types: [labeled]
-
-  # PR-fix mode: labeled with need-fix OR new commits
+    types: [opened, edited, labeled]
   pull_request:
-    types: [labeled, synchronize]
+    types: [opened, synchronize, labeled, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        required: true
+        default: issue
+        options: [issue, pr-fix]
+      number:
+        type: number
+        required: true
+        description: "Issue/PR number"
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+concurrency:
+  group: dev-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
-  dev-issue:
-    if: github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'bot:implement'
+  run-dev:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write         # push branch
+      pull-requests: write    # aprire/commentare PR
+      issues: write           # commentare issue
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
-        run: pip install httpx openai anthropic google-generativeai
-      - name: Configure git
+
+      - name: Install Python deps
         run: |
-          git config --global user.name "AI Developer"
-          git config --global user.email "ai-dev@users.noreply.github.com"
-      - name: Run Developer (Issue Mode)
-        run: python .github/agents/dev.py
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f .github/agents/requirements.txt ]; then pip install -r .github/agents/requirements.txt; fi
+          pip install httpx
+
+      - name: Decide mode & set env
+        id: decide
+        shell: bash
+        run: |
+          MODE=""
+          NUM=""
+          # workflow_dispatch override
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ inputs.mode }}"
+            NUM="${{ inputs.number }}"
+          elif [ "${{ github.event_name }}" = "issues" ] && echo "${{ toJson(github.event.issue.labels.*.name) }}" | grep -qi 'ai-dev'; then
+            MODE="issue"
+            NUM="${{ github.event.issue.number }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ] && echo "${{ toJson(github.event.pull_request.labels.*.name) }}" | grep -qi 'ai-fix'; then
+            MODE="pr-fix"
+            NUM="${{ github.event.pull_request.number }}"
+          fi
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+          echo "number=$NUM" >> $GITHUB_OUTPUT
+
+      - name: Run dev agent
+        if: steps.decide.outputs.mode != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}   # opzionale
           GITHUB_REPOSITORY: ${{ github.repository }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DEVELOPER_MODEL: ${{ vars.DEVELOPER_MODEL || 'gpt-4o-mini' }}
-
-  dev-pr-fix:
-    if: >
-      github.event_name == 'pull_request' && (
-        (github.event.action == 'labeled' && github.event.label.name == 'need-fix') ||
-        github.event.action == 'synchronize'
-      )
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_CLASSIC_TOKEN || secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install httpx openai anthropic google-generativeai
-      - name: Configure git (CRITICAL for commits)
-        run: |
-          git config --global user.name "AI Developer"
-          git config --global user.email "ai-dev@users.noreply.github.com"
-      - name: Run Developer (PR-fix Mode)
+          # opzionali
+          DEVELOPER_MODEL: gpt-4o-mini
+          PROJECT_ROOT: ${{ vars.DEV_PROJECT_ROOT }}
+          ISSUE_NUMBER: ${{ steps.decide.outputs.mode == 'issue' && steps.decide.outputs.number || '' }}
+          PR_NUMBER: ${{ steps.decide.outputs.mode == 'pr-fix' && steps.decide.outputs.number || '' }}
         run: python .github/agents/dev.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
-          GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-          GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DEVELOPER_MODEL: ${{ vars.DEVELOPER_MODEL || 'gpt-4o-mini' }}
-
-
-           
