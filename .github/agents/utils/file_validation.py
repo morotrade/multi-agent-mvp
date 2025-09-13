@@ -2,6 +2,7 @@
 """
 File path validation and security guards
 """
+import os
 import re
 import fnmatch
 from typing import List
@@ -62,10 +63,28 @@ def is_path_safe(path: str) -> bool:
     # Disallow parent-directory refs and empty segments
     return all(part not in ("..", "") for part in p.parts)
 
-def validate_diff_files(diff_content: str) -> None:
-    """Validate that diff only touches allowed files"""
+def _normalize_root(project_root: str) -> str:
+    """Return posix-normalized project_root without trailing slash, e.g. 'projects/math'."""
+    root = str(PurePosixPath(project_root).as_posix()).strip()
+    return root[:-1] if root.endswith("/") else root
+
+def validate_diff_files(
+    diff_content: str,
+    project_root: str | None = None,
+    *,
+    allow_project_readme: bool = True
+) -> None:
+    """
+    Validate that diff only touches allowed files.
+    If project_root is provided (or PROJECT_ROOT/DEV_PROJECT_ROOT env vars are set),
+    all paths MUST live under that root (exception: <root>/README.md when allow_project_readme=True).
+    """
     files = paths_from_unified_diff(diff_content)
     violations = []
+    
+    # Resolve effective project root (param > env: PROJECT_ROOT > env: DEV_PROJECT_ROOT)
+    root = project_root or os.getenv("PROJECT_ROOT") or os.getenv("DEV_PROJECT_ROOT")
+    root_norm = _normalize_root(root) if root else None
     
     for p in files:
         if not is_path_safe(p):
@@ -74,6 +93,13 @@ def validate_diff_files(diff_content: str) -> None:
             violations.append(f"{p} (not in whitelist)")
         if is_path_denied(p):
             violations.append(f"{p} (in denylist)")
+        
+        # Enforce project root (if provided)
+        if root_norm:
+            pn = str(PurePosixPath(p).as_posix()).strip()
+            allowed = pn.startswith(root_norm + "/") or (allow_project_readme and pn == f"{root_norm}/README.md")
+            if not allowed:
+                violations.append(f"{p} (outside project root '{root_norm}')")
     
     if violations:
         raise Exception(f"Diff contains unauthorized files: {violations}")

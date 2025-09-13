@@ -6,7 +6,7 @@ Path isolation and project root management for AI Developer
 import os
 import re
 from typing import List
-
+from pathlib import PurePosixPath
 from utils import resolve_project_tag, slugify
 
 
@@ -61,18 +61,17 @@ def enforce_diff_under_root(diff_text: str, project_root: str) -> None:
     violations = []
     
     project_root_normalized = project_root.rstrip("/")
+    # normalizza usando separatori POSIX per i path del diff
+    project_root_normalized = str(PurePosixPath(project_root).as_posix()).rstrip("/")
     
     for path in paths:
-        path_normalized = path.strip().lstrip("./")
+        path_normalized = str(PurePosixPath(path).as_posix()).strip()
+        allowed = (
+            path_normalized.startswith(project_root_normalized + "/")
+            or path_normalized == f"{project_root_normalized}/README.md"
+        )
         
-        # Check if path is under project root or is an allowed root-level file
-        allowed_conditions = [
-            path_normalized.startswith(project_root_normalized + "/"),
-            path_normalized == f"{project_root_normalized}/README.md",
-            path_normalized == "README.md"  # Allow root README
-        ]
-        
-        if not any(allowed_conditions):
+        if not allowed:
             violations.append(path_normalized)
     
     if violations:

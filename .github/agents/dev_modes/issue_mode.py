@@ -95,8 +95,11 @@ Project root (mandatory for ALL new/modified files): `{project_root}`
 Primary language of the repo: {repo_lang}
 
 Constraints:
-- Modify or create files ONLY under `{project_root}/` (exception: a README.md at the project root is allowed).
-- Return ONE unified diff. No prose outside the block.
+- Modify or create files ONLY under `{project_root}/`.
+- The ONLY allowed exception is `{project_root}/README.md`.
+- Never touch the repository-root `README.md`.
+- Return exactly ONE fenced unified diff block (```diff ... ```).
+- No prose outside the diff block.
 - Keep changes self-contained and minimal to satisfy acceptance criteria.
 """
         content = f"# Issue Title\n{issue_title}\n\n# Issue Body\n{issue_body}\n"

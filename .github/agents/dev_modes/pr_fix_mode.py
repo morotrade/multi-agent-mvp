@@ -6,6 +6,7 @@ PR Fix mode: PR reviewer feedback → In-place fixes for AI Developer
 import re
 import subprocess
 from typing import TYPE_CHECKING, List, Dict
+from collections import Counter
 
 from utils import get_repo_language
 from dev_core.path_isolation import compute_project_root_for_pr, ensure_dir
@@ -41,21 +42,26 @@ class PRFixMode:
                 print("❌ Cannot get PR head branch.")
                 return 1
             
-            # Setup project root
-            project_root = compute_project_root_for_pr(pr_number, pr_data.get("body", ""))
-            print(f"📁 PROJECT_ROOT = {project_root}")
-            ensure_dir(project_root)
-            
-            # Read reviewer feedback and PR context
+            # Carica feedback e file PR (servono per inferire la root)
             reviewer_findings = self._read_reviewer_sticky(pr_number)
             changed_files = self.github.get_pr_files(pr_number)
-            
-            # Generate fix diff
+
+            # Setup project root (env/body)  inferenza dai file se fallback pr-<n>
+            project_root = compute_project_root_for_pr(pr_number, pr_data.get("body", ""))
+            project_root = self._maybe_infer_root_from_files(project_root, changed_files)
+            self.github.post_comment(pr_number, f"🔎 Using project root: `{project_root}` for PR-fix")
+            print(f"📁 PROJECT_ROOT = {project_root}")
+            ensure_dir(project_root)
+
+            # Genera il diff per i fix
             diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files)
-            if not diff or "diff --git " not in diff:
-                self.github.post_comment(pr_number,
-                    "ℹ️ Nessuna modifica proposta dall'LLM per i fix (nessun blocco `diff --git`).")
-                print("ℹ️ No-op: empty/invalid diff (PR-fix)")
+            # Accettiamo unified diff anche senza 'diff --git'; rifiutiamo solo se vuoto
+            if not diff or not diff.strip():
+                self.github.post_comment(
+                    pr_number,
+                    "ℹ️ Nessuna modifica proposta dall'LLM per i fix (diff vuoto)."
+                )
+                print("ℹ️ No-op: empty diff (PR-fix)")
                 return 0
             
             # Checkout PR branch and apply fixes
@@ -76,6 +82,27 @@ class PRFixMode:
             self.github.post_comment(pr_number, f"❌ LLM diff validation failed in PR-fix mode:\n\n```\n{error_msg}\n```")
             print(f"❌ PR fix mode failed: {e}")
             return 1
+    
+    def _maybe_infer_root_from_files(self, project_root: str, changed_files: List[Dict]) -> str:
+        """
+        Se la root è nel fallback 'projects/pr-<num>', prova a dedurla dai file del PR:
+        es. 'projects/math/math_utils.py' -> 'projects/math'
+        """
+        try:
+            if not project_root or project_root.startswith("projects/pr-"):
+                candidates = []
+                for f in changed_files or []:
+                    path = f.get("filename", "")
+                    m = re.match(r"^projects/([^/]+)/", path)
+                    if m:
+                        candidates.append(f"projects/{m.group(1)}")
+                if candidates:
+                    deduced = Counter(candidates).most_common(1)[0][0]
+                    print(f"🔎 Deduced project root from files: {deduced}")
+                    return deduced
+        except Exception as _:
+            pass
+        return project_root
     
     def _read_reviewer_sticky(self, pr_number: int) -> str:
         """Read sticky reviewer comment with findings"""
@@ -123,8 +150,14 @@ Primary language of the repo: {repo_lang}
 Constraints:
 - Only modify files under `{project_root}/` (exception: `{project_root}/README.md`).
 - Apply changes IN PLACE to address the reviewer findings.
-- Return ONE unified diff. No prose outside the block.
-- Prefer small, targeted edits; do not refactor unrelated code.
+- Return exactly ONE fenced unified diff block. No prose outside the fence.
+  The block MUST look like:
+  ```diff
+  --- a/<path/within/{project_root}/...>
+  +++ b/<path/within/{project_root}/...>
+  @@ ...
+  ```
+- Do NOT include any additional commentary or multiple code blocks.
 """
         
         details = f"""
