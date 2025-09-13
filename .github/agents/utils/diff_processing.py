@@ -10,7 +10,11 @@ from typing import List
 from .file_validation import is_path_safe
 
 def extract_single_diff(markdown_text: str) -> str:
-    """Extract and validate single diff from markdown with enhanced validation"""
+    """
+    Estrae un unified diff dal testo. Se l'LLM produce più blocchi ```diff/```patch,
+    li combina in un unico diff valido (concatenazione), ripulendo eventuali header
+    "diff --git" e ritagliando dal primo '--- ' di ciascun blocco.
+    """
     if not markdown_text or not markdown_text.strip():
         raise Exception("Empty response from LLM")
     
@@ -27,11 +31,29 @@ def extract_single_diff(markdown_text: str) -> str:
         if blocks:
             break
     
-    if len(blocks) != 1:
-        raise Exception(f"Expected exactly 1 diff block, found {len(blocks)}. "
-                       "LLM must return a single unified diff.")
-    
-    diff = blocks[0].strip()
+    # Se troviamo più blocchi, combiniamoli in un unico diff valido
+    if not blocks:
+        raise Exception("No diff block found in LLM output")
+
+    parts = []
+    for b in blocks:
+        b = (b or "").strip()
+        if not b:
+            continue
+        # Se il blocco inizia con 'diff --git', ritaglia fino al primo header unificato
+        if b.startswith("diff --git"):
+            m = re.search(r"(?m)^--- (?:a/|/dev/null)", b)
+            if m:
+                b = b[m.start():]
+        # Considera solo blocchi che hanno almeno l'header unificato
+        if not re.search(r"(?m)^--- (?:a/|/dev/null)", b):
+            continue
+        parts.append(b)
+
+    if not parts:
+        raise Exception("Invalid diff format: cannot extract a valid unified diff block")
+
+    diff = "\n".join(parts).strip()
     if not diff:
         raise Exception("Diff block is empty")
 
@@ -44,7 +66,7 @@ def extract_single_diff(markdown_text: str) -> str:
         cleaned_lines.append(cleaned_line)
     diff = "\n".join(cleaned_lines)
 
-    # Enhanced validation
+    # Enhanced validation (vale anche per diff combinati)
     if not re.search(r"^--- (?:a/|/dev/null)", diff, flags=re.M):
         raise Exception("Invalid diff format: must start with '--- a/' or '--- /dev/null'")
     
@@ -58,7 +80,7 @@ def extract_single_diff(markdown_text: str) -> str:
     if len(diff) > 800_000:
         raise Exception("Diff too large (>800KB)")
     
-    # Check for multiple file headers (should be single logical change)
+    # Check for multiple file headers (limite di sicurezza; multi-file ok entro 20)
     file_count = len(re.findall(r"^--- (?:a/|/dev/null)", diff, flags=re.M))
     if file_count > 20:
         raise Exception(f"Diff touches too many files ({file_count}). "
