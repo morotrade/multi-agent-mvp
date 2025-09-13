@@ -2,85 +2,72 @@
 
 on:
   issues:
-    types: [opened, edited, labeled]
+    types: [labeled]          # ← solo quando si AGGIUNGE una label all'issue
   pull_request:
-    types: [opened, synchronize, labeled, ready_for_review]
+    types: [labeled]          # ← solo quando si AGGIUNGE una label al PR
   workflow_dispatch:
     inputs:
       mode:
         type: choice
         required: true
         default: issue
-        options: [issue, pr-fix]
+        options: [issue, need-fix]
       number:
         type: number
         required: true
         description: "Issue/PR number"
 
 concurrency:
-  group: dev-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  group: dev-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   run-dev:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'bot:implement')) ||
+      (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'need-fix') || 
+       contains(github.event.pull_request.labels.*.name, 'ai-fix'))) ||
+      (github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write         # push branch
-      pull-requests: write    # aprire/commentare PR
-      issues: write           # commentare issue
+      contents: write
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: .github/agents/requirements.txt
 
       - name: Install Python deps
         run: |
+          set -e
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then 
             pip install -r requirements.txt
           fi
-
           if [ -f .github/agents/requirements.txt ]; then 
             pip install -r .github/agents/requirements.txt
           else
             pip install httpx openai anthropic google-generativeai
           fi
 
-      - name: Decide mode & set env
-        id: decide
-        shell: bash
-        run: |
-          MODE=""
-          NUM=""
-          # workflow_dispatch override
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MODE="${{ inputs.mode }}"
-            NUM="${{ inputs.number }}"
-          elif [ "${{ github.event_name }}" = "issues" ] && echo "${{ toJson(github.event.issue.labels.*.name) }}" | grep -qi 'ai-dev'; then
-            MODE="issue"
-            NUM="${{ github.event.issue.number }}"
-          elif [ "${{ github.event_name }}" = "pull_request" ] && echo "${{ toJson(github.event.pull_request.labels.*.name) }}" | grep -qi 'ai-fix'; then
-            MODE="pr-fix"
-            NUM="${{ github.event.pull_request.number }}"
-          fi
-          echo "mode=$MODE" >> $GITHUB_OUTPUT
-          echo "number=$NUM" >> $GITHUB_OUTPUT
-
+      # Niente più "Decide mode": usiamo direttamente le espressioni di GitHub
       - name: Run dev agent
-        if: steps.decide.outputs.mode != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}   # opzionale
+          GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # opzionali
           DEVELOPER_MODEL: gpt-4o-mini
           PROJECT_ROOT: ${{ vars.DEV_PROJECT_ROOT }}
-          ISSUE_NUMBER: ${{ steps.decide.outputs.mode == 'issue' && steps.decide.outputs.number || '' }}
-          PR_NUMBER: ${{ steps.decide.outputs.mode == 'pr-fix' && steps.decide.outputs.number || '' }}
+          # Imposta automaticamente in base all'evento:
+          ISSUE_NUMBER: ${{ github.event_name == 'issues' && github.event.issue.number || (inputs.mode == 'issue' && inputs.number || '') }}
+          PR_NUMBER:    ${{ github.event_name == 'pull_request' && github.event.pull_request.number || (inputs.mode == 'need-fix' && inputs.number || '') }}
         run: python .github/agents/dev.py

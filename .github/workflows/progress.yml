@@ -4,7 +4,8 @@ on:
   pull_request_review:
     types: [submitted]
   pull_request:
-    types: [closed]
+-   types: [closed]
++   types: [labeled, closed]   # ← ascolta anche quando il Reviewer applica le label
   workflow_dispatch: {}
 
 concurrency:
@@ -13,18 +14,21 @@ concurrency:
 
 jobs:
   progress:
-    # Esegui su APPROVED o su PR merged, o manuale
+    # Esegui su APPROVED, su PR merged, su label 'ready-to-merge', o manuale.
     if: |
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'ready-to-merge') &&
+       !contains(github.event.pull_request.labels.*.name, 'need-fix'))   # evita partire se c’è ancora need-fix
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      pull-requests: write     # commenti su PR (via /issues)
-      issues: write            # commenti/labels su Issue
-      repository-projects: write  # se vuoi aggiornare Project con GITHUB_TOKEN
+      pull-requests: write
+      issues: write
+      repository-projects: write
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +42,6 @@ jobs:
           if [ -f requirements.txt ]; then 
             pip install -r requirements.txt
           fi
-
           if [ -f .github/agents/requirements.txt ]; then 
             pip install -r .github/agents/requirements.txt
           else
@@ -48,13 +51,12 @@ jobs:
       - name: Run progressor
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Facoltativo: PAT classico per Project V2 (org/repo projects)
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          # Gate auto-merge solo quando evento è una review APPROVED
-          AUTO_MERGE_PR: ${{ github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && 'true' || 'false' }}
+          # Auto-merge abilitato su review APPROVED oppure su label 'ready-to-merge'
+          AUTO_MERGE_PR: ${{ (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
+                              (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ready-to-merge')) }}
           AUTO_MERGE_METHOD: squash
-          # Status field + opzioni Project V2 (facoltativo)
           GH_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           GITHUB_PROJECT_ID: ${{ secrets.GH_PROJECT_ID }}
           PROJECT_STATUS_FIELD_ID: ${{ secrets.PROJECT_STATUS_FIELD_ID }}

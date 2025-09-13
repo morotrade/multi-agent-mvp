@@ -3,16 +3,16 @@ name: AI Analyzer
 on:
   issues:
     types: [labeled]
-
-concurrency:
-  group: analyzer-${{ github.event.issue.number }}
-  cancel-in-progress: true
+  workflow_dispatch: {}
 
 jobs:
   analyze:
     if: contains(github.event.issue.labels.*.name, 'bot:analyze')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    concurrency:
+      group: analyzer-${{ github.event.issue.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       issues: write
