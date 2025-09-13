@@ -5,8 +5,9 @@ PR Fix mode: PR reviewer feedback → In-place fixes for AI Developer
 """
 import re
 import subprocess
-from typing import TYPE_CHECKING, List, Dict
+from typing import TYPE_CHECKING, List, Dict, Optional, Tuple
 from collections import Counter
+from pathlib import Path
 
 from utils import get_repo_language
 from dev_core.path_isolation import compute_project_root_for_pr, ensure_dir
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from dev_core.git_operations import GitOperations
     from dev_core.diff_processor import DiffProcessor
 
+SNAPSHOT_CHAR_LIMIT = 8000  # evita prompt eccessivi
+MAX_SNAPSHOT_FILES = 20     # limita quanti file embeddare nel prompt
 
 class PRFixMode:
     """Handles PR fix flow: reviewer feedback → in-place patches"""
@@ -53,8 +56,16 @@ class PRFixMode:
             print(f"📁 PROJECT_ROOT = {project_root}")
             ensure_dir(project_root)
 
-            # Genera il diff per i fix
-            diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files)
+            # Checkout PR branch PRIMA di generare il diff: così leggiamo i file reali
+            branch = pr_data.get("head", {}).get("ref")
+            self._checkout_pr_branch(branch)
+
+            # Raccogli snapshot dei file cambiati sotto project_root
+            snapshots = self._collect_snapshots(project_root, changed_files)
+
+            # Genera il diff per i fix (con snapshot reali a contesto)
+            diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files, snapshots)
+
             # Accettiamo unified diff anche senza 'diff --git'; rifiutiamo solo se vuoto
             if not diff or not diff.strip():
                 self.github.post_comment(
@@ -64,8 +75,7 @@ class PRFixMode:
                 print("ℹ️ No-op: empty diff (PR-fix)")
                 return 0
             
-            # Checkout PR branch and apply fixes
-            self._checkout_pr_branch(branch)
+            # Applica i fix
             success = self._apply_fixes(diff)
             if not success:
                 self.github.post_comment(pr_number, "❌ Failed to apply LLM patch in PR-fix mode. See logs.")
@@ -134,7 +144,7 @@ class PRFixMode:
         
         return ""
     
-    def _build_pr_fix_prompt(self, project_root: str, pr_data: Dict, reviewer_findings: str, changed_files: List[Dict], repo_lang: str) -> str:
+    def _build_pr_fix_prompt(self, project_root: str, pr_data: Dict, reviewer_findings: str, changed_files: List[Dict], repo_lang: str, snapshots: List[Tuple[str, str]]) -> str:    
         """Build prompt for LLM to fix PR issues"""
         # Prepare summary of changed files
         file_list = "\n".join(f"- {f.get('filename', '')}" for f in changed_files[:50])
@@ -148,9 +158,9 @@ Project root (mandatory): `{project_root}`
 Primary language of the repo: {repo_lang}
 
 Constraints:
-- Only modify files under `{project_root}/` (exception: `{project_root}/README.md`).
-- Apply changes IN PLACE to address the reviewer findings.
-- Return exactly ONE fenced unified diff block. No prose outside the fence.
+- Output EXACTLY ONE fenced unified diff block and NOTHING ELSE.
+- Use the snapshots below as the exact current contents for building hunks.
+- No prose outside the diff block.
   The block MUST look like:
   ```diff
   --- a/<path/within/{project_root}/...>
@@ -173,13 +183,41 @@ Constraints:
 # Files currently in the PR
 {file_list}
 """
+        # Aggiungi snapshot correnti (read-only) dei file sotto root
+        if snapshots:
+            details += "\n# Current file snapshots (read-only)\n"
+            for rel, content in snapshots:
+                lang = "python" if rel.endswith(".py") else ""
+                details += f"\n## {rel}\n```{lang}\n{content}\n```\n"
         return guidance + "\n" + details
     
-    def _generate_fix_diff(self, project_root: str, pr_data: Dict, reviewer_findings: str, changed_files: List[Dict]) -> str:
+    def _generate_fix_diff(self, project_root: str, pr_data: Dict, reviewer_findings: str, changed_files: List[Dict], snapshots: List[Tuple[str, str]]) -> str:
         """Generate diff to fix PR issues"""
         repo_lang = get_repo_language()
-        prompt = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang)
+        prompt = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots)
         return self.diff_processor.process_full_cycle(prompt, project_root)
+    
+    def _collect_snapshots(self, project_root: str, changed_files: List[Dict]) -> List[Tuple[str, str]]:
+        """
+        Raccoglie il contenuto attuale (post-checkout) dei file cambiati sotto project_root.
+        Ritorna lista di tuple (relative_path, content_troncato).
+        """
+        out: List[Tuple[str, str]] = []
+        root = project_root.rstrip("/")
+        for f in changed_files[:MAX_SNAPSHOT_FILES]:
+            rel = (f.get("filename", "") or "").strip().lstrip("./")
+            if not rel or not rel.startswith(root + "/"):
+                continue
+            p = Path(rel)
+            if p.exists() and p.is_file():
+                try:
+                   txt = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                if len(txt) > SNAPSHOT_CHAR_LIMIT:
+                    txt = txt[:SNAPSHOT_CHAR_LIMIT] + "\n# ... (truncated) ..."
+                out.append((rel, txt))
+        return out
     
     def _checkout_pr_branch(self, branch: str) -> None:
         """Checkout the PR branch for applying fixes"""
