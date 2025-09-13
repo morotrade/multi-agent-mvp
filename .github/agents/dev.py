@@ -22,8 +22,8 @@ import json
 from typing import Optional
 
 # Import segmented modules
-from core import GitOperations, GitHubClient, DiffProcessor
-from modes import IssueMode, PRFixMode
+from dev_core import GitOperations, GitHubClient, DiffProcessor
+from dev_modes import IssueMode, PRFixMode
 
 
 def get_issue_number() -> int:
