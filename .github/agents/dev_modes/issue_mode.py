@@ -8,12 +8,12 @@ import subprocess
 from typing import TYPE_CHECKING
 
 from utils import get_repo_language, slugify
-from core.path_isolation import compute_project_root_for_issue, ensure_dir
+from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
 
 if TYPE_CHECKING:
-    from core.github_client import GitHubClient
-    from core.git_operations import GitOperations
-    from core.diff_processor import DiffProcessor
+    from dev_core.github_client import GitHubClient
+    from dev_core.git_operations import GitOperations
+    from dev_core.diff_processor import DiffProcessor
 
 
 class IssueMode:
