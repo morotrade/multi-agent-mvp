@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 
 from utils import get_repo_language, slugify
 from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
+from dev_core import (
+    enforce_all,
+    constraints_block, diff_format_block, files_list_block, snapshots_block,
+    comment_with_llm_preview
+)
 
 if TYPE_CHECKING:
     from dev_core.github_client import GitHubClient
@@ -48,6 +53,8 @@ class IssueMode:
                     "ℹ️ Nessuna modifica proposta dall'LLM (diff vuoto). Nulla da applicare.")
                 print("ℹ️ No-op: empty diff")
                 return 0
+            # Enforce: tutto sotto project_root (eccezione README di progetto)
+            enforce_all(diff, project_root, allow_project_readme=True)
             
             # Create branch and implement
             branch = self._create_implementation_branch(issue_number, issue_title)
@@ -69,16 +76,8 @@ class IssueMode:
             return 0
             
         except Exception as e:
-            error_msg = self.diff_processor.sanitize_error_for_comment(str(e))
-            preview = ""
-            try:
-                preview = self.diff_processor.last_response_snippet()
-            except Exception:
-                pass
-            comment = f"❌ Issue implementation failed:\n\n```\n{error_msg}\n```"
-            if preview:
-                comment += f"\n\n<details><summary>LLM raw output (truncated)</summary>\n\n```text\n{preview}\n```\n</details>"
-            self.github.post_comment(issue_number, comment)
+            # Diagnostica uniforme
+            comment_with_llm_preview(self.github, issue_number, "Issue implementation failed", e, self.diff_processor)
             print(f"❌ Issue mode failed: {e}")
             return 1
     
@@ -96,22 +95,21 @@ class IssueMode:
         return issue_title, issue_body
     
     def _build_issue_prompt(self, project_root: str, issue_title: str, issue_body: str, repo_lang: str) -> str:
-        """Build prompt for LLM to implement issue"""
-        guidance = f"""
-You are implementing a feature from an issue.
-Project root (mandatory for ALL new/modified files): `{project_root}`
-Primary language of the repo: {repo_lang}
-
-Constraints:
-- Modify or create files ONLY under `{project_root}/`.
-- The ONLY allowed exception is `{project_root}/README.md`.
-- Never touch the repository-root `README.md`.
-- Return exactly ONE fenced unified diff block (```diff ... ```).
-- No prose outside the diff block.
-- Keep changes self-contained and minimal to satisfy acceptance criteria.
-"""
-        content = f"# Issue Title\n{issue_title}\n\n# Issue Body\n{issue_body}\n"
-        return guidance + "\n" + content
+            """Build prompt for LLM to implement issue (blocchi condivisi)"""
+            header = (
+                "You are implementing a feature from an issue.\n"
+                f"Project root (mandatory): `{project_root}`\n"
+                f"Primary language of the repo: {repo_lang}\n"
+            )
+            prompt = (
+                header
+                + constraints_block(project_root)
+                + diff_format_block(project_root)
+                + files_list_block([])            
+                + snapshots_block([])              
+                + f"\n# Issue Title\n{issue_title}\n\n# Issue Body\n{issue_body}\n"
+            )
+            return prompt
     
     def _generate_implementation_diff(self, project_root: str, issue_title: str, issue_body: str) -> str:
         """Generate diff for issue implementation"""

@@ -10,6 +10,12 @@ from .path_isolation import (
     enforce_diff_under_root,
     ensure_dir
 )
+from .guards import enforce_all
+from .prompt_blocks import (
+    constraints_block, diff_format_block, files_list_block, findings_block, snapshots_block
+)
+from .snapshots import collect_snapshots
+from .errors import comment_with_llm_preview
 
 __all__ = [
     'GitOperations',
@@ -18,5 +24,9 @@ __all__ = [
     'compute_project_root_for_issue',
     'compute_project_root_for_pr',
     'enforce_diff_under_root',
-    'ensure_dir'
+    'ensure_dir',
+    "enforce_all",
+    "constraints_block", "diff_format_block", "files_list_block", "findings_block", "snapshots_block",
+    "collect_snapshots",
+    "comment_with_llm_preview",
 ]
