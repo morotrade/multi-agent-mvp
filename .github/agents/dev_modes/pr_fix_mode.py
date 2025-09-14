@@ -73,29 +73,46 @@ class PRFixMode:
                 char_limit=SNAPSHOT_CHAR_LIMIT
             )
 
-            # Genera il diff per i fix (con snapshot reali a contesto)
-            diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files, snapshots)
-
-            # Accettiamo unified diff anche senza 'diff --git'; rifiutiamo solo se vuoto
-            if not diff or not diff.strip():
-                self.github.post_comment(
-                    pr_number,
-                    "ℹ️ Nessuna modifica proposta dall'LLM per i fix (diff vuoto)."
-                )
-                print("ℹ️ No-op: empty diff (PR-fix)")
-                return 0
-            
-            # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
-            diff = normalize_diff_headers_against_fs(diff, project_root)
-
-            # Enforce: tutto sotto project_root (eccezione README di progetto)
-            enforce_all(diff, project_root, allow_project_readme=True)
-            
-            # Applica i fix
-            success = self._apply_fixes(diff)
-            if not success:
-                self.github.post_comment(pr_number, "❌ Failed to apply LLM patch in PR-fix mode. See logs.")
-                return 1
+            # Genera + valida + applica con un retry locale (una sola volta) su errori formali
+            retried = False
+            while True:
+                diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files, snapshots)
+                if not diff or not diff.strip():
+                    self.github.post_comment(
+                        pr_number,
+                        "ℹ️ Nessuna modifica proposta dall'LLM per i fix (diff vuoto)."
+                    )
+                    print("ℹ️ No-op: empty diff (PR-fix)")
+                    return 0
+                try:
+                    # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
+                    diff = normalize_diff_headers_against_fs(diff, project_root)
+                    # Enforce: tutto sotto project_root (eccezione README di progetto)
+                    enforce_all(diff, project_root, allow_project_readme=True)
+                    # Applica i fix
+                    success = self._apply_fixes(diff)
+                    if not success:
+                        raise RuntimeError("git apply failed")
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    retriable = any(k in msg for k in ("missing unified hunk", "malformed patch", "corrupt patch", "git apply failed"))
+                    if retriable and not retried:
+                        retried = True
+                        # Istruzioni esplicite per obbligare unified hunks validi o full-file diff
+                        repo_lang = get_repo_language()
+                        prompt = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots)
+                        prompt += (
+                            "\n\n# RETRY INSTRUCTIONS\n"
+                            "- Your previous patch failed (invalid or missing '@@' hunks / apply failed).\n"
+                            "- Regenerate ONE fenced unified diff.\n"
+                            "- Include proper '@@' sections; if unsure, emit FULL-FILE unified diffs for files you modify.\n"
+                        )
+                        # Rigenera con prompt rinforzato
+                        diff = self.diff_processor.process_full_cycle(prompt, project_root)
+                        # Torna al loop per normalizzare/enforce/apply
+                        continue
+                    raise
             
             # Commit and push fixes
             self._commit_and_push_fixes(pr_number, branch)

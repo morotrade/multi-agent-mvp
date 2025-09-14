@@ -27,7 +27,39 @@ def files_list_block(paths: list[str]) -> str:
     return f"# Files in scope\n{items}\n"
 
 def findings_block(text: str) -> str:
-    return f"# Reviewer findings / Notes\n{text}\n"
+    """
+    Include i findings del reviewer, rimuovendo in modo CHIRURGICO
+    l'intera sezione 'Suggested Patches' (spesso contiene diff parziali
+    e confonde l'LLM).
+    """
+    if not text:
+        return ""
+
+    import re
+    lines = text.splitlines()
+    out = []
+    skip = False
+    for i, line in enumerate(lines):
+        # start: riga che contiene 'Suggested Patches' (case-insensitive)
+        if not skip and re.search(r'(?i)\bSuggested Patches\b', line):
+            skip = True
+            continue
+
+        if skip:
+            # stop: incontriamo un "boundary" (intestazioni/sezioni successive)
+            if (
+                line.startswith("#")
+                or line[:1] in ("🔄", "🏷", "📂", "📊", "🎯", "🔍", "🎯", "💡", "⚠")
+                or re.search(r'(?i)^\s*(Auto-Review Loop|Merge info)\b', line)
+            ):
+                skip = False
+                out.append(line)
+            # altrimenti continuiamo a saltare
+        else:
+            out.append(line)
+
+    cleaned = "\n".join(out).rstrip() + "\n"
+    return f"# Reviewer findings / Notes\n{cleaned}"
 
 def snapshots_block(snapshots: list[tuple[str, str]]) -> str:
     if not snapshots:

@@ -5,14 +5,14 @@ Issue mode: Issue → Branch → PR flow for AI Developer
 """
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional
 
 from utils import get_repo_language, slugify
 from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
 from dev_core import (
     enforce_all,
     constraints_block, diff_format_block, files_list_block, snapshots_block,
-    comment_with_llm_preview, normalize_diff_headers_against_fs
+    comment_with_llm_preview, normalize_diff_headers_against_fs, normalize_diff_headers_against_fs
 )
 
 if TYPE_CHECKING:
@@ -45,20 +45,37 @@ class IssueMode:
             print(f"📁 PROJECT_ROOT = {project_root}")
             ensure_dir(project_root)
             
-            # Generate implementation diff
-            diff = self._generate_implementation_diff(project_root, issue_title, issue_body)
-            
-            if not diff or not diff.strip():
-                self.github.post_comment(issue_number,
-                    "ℹ️ Nessuna modifica proposta dall'LLM (diff vuoto). Nulla da applicare.")
-                print("ℹ️ No-op: empty diff")
-                return 0
-            
-            # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
-            diff = normalize_diff_headers_against_fs(diff, project_root)
-            
-            # Enforce: tutto sotto project_root (eccezione README di progetto)
-            enforce_all(diff, project_root, allow_project_readme=True)
+            # Costruisci prompt e genera diff con un retry locale (una sola volta) su errori formali
+            repo_lang = get_repo_language()
+            prompt = self._build_issue_prompt(project_root, issue_title, issue_body, repo_lang)
+            retried = False
+            while True:
+                # Generate implementation diff
+                diff = self.diff_processor.process_full_cycle(prompt, project_root)
+                if not diff or not diff.strip():
+                    self.github.post_comment(issue_number,
+                        "ℹ️ Nessuna modifica proposta dall'LLM (diff vuoto). Nulla da applicare.")
+                    print("ℹ️ No-op: empty diff")
+                    return 0
+                try:
+                    # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
+                    diff = normalize_diff_headers_against_fs(diff, project_root)
+                    # Enforce: tutto sotto project_root (eccezione README di progetto)
+                    enforce_all(diff, project_root, allow_project_readme=True)
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    retriable = any(k in msg for k in ("missing unified hunk", "malformed patch", "corrupt patch"))
+                    if retriable and not retried:
+                        retried = True
+                        prompt += (
+                            "\n\n# RETRY INSTRUCTIONS\n"
+                            "- Your previous patch failed (invalid or missing '@@' hunks).\n"
+                            "- Regenerate ONE fenced unified diff.\n"
+                            "- Include proper '@@' sections; if unsure, emit FULL-FILE unified diffs for files you modify.\n"
+                        )
+                        continue
+                    raise
             
             # Create branch and implement
             branch = self._create_implementation_branch(issue_number, issue_title)
