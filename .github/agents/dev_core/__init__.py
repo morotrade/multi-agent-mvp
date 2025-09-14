@@ -16,6 +16,7 @@ from .prompt_blocks import (
 )
 from .snapshots import collect_snapshots
 from .errors import comment_with_llm_preview
+from .diff_helpers import normalize_diff_headers_against_fs
 
 __all__ = [
     'GitOperations',
@@ -29,4 +30,6 @@ __all__ = [
     "constraints_block", "diff_format_block", "files_list_block", "findings_block", "snapshots_block",
     "collect_snapshots",
     "comment_with_llm_preview",
+    "comment_with_llm_preview",
+    "normalize_diff_headers_against_fs",
 ]

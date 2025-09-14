@@ -12,7 +12,7 @@ from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
 from dev_core import (
     enforce_all,
     constraints_block, diff_format_block, files_list_block, snapshots_block,
-    comment_with_llm_preview
+    comment_with_llm_preview, normalize_diff_headers_against_fs
 )
 
 if TYPE_CHECKING:
@@ -53,6 +53,10 @@ class IssueMode:
                     "ℹ️ Nessuna modifica proposta dall'LLM (diff vuoto). Nulla da applicare.")
                 print("ℹ️ No-op: empty diff")
                 return 0
+            
+            # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
+            diff = normalize_diff_headers_against_fs(diff, project_root)
+            
             # Enforce: tutto sotto project_root (eccezione README di progetto)
             enforce_all(diff, project_root, allow_project_readme=True)
             

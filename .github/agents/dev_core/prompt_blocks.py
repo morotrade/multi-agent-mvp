@@ -16,6 +16,8 @@ def diff_format_block(project_root: str) -> str:
         f"+++ b/<path/within/{project_root}/...>\n"
         "@@ ...\n"
         "```\n"
+        "- For **new files**, use `--- /dev/null` and `+++ b/<path>` with hunks starting at `@@ -0,0 +1,N @@`.\n"
+        "- For **deleted files**, use `--- a/<path>` and `+++ /dev/null`.\n"
         "- No prose outside the code fence.\n"
     )
     
