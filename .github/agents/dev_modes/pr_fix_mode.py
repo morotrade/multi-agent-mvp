@@ -20,7 +20,7 @@ from dev_core import (
 )
 from state import (
     ThreadLedger, SnapshotStore, DiffRecorder,
-    preflight_git_apply_check, preflight_git_apply_threeway
+    preflight_git_apply_check, preflight_git_apply_threeway, safe_snapshot_existing_files
 )
 
 if TYPE_CHECKING:
@@ -94,12 +94,24 @@ class PRFixMode:
                 ).stdout.strip())
             except Exception:
                 repo_root = Path.cwd()
+            
             snap = SnapshotStore(repo_root)
             if must_edit:
-                metas = snap.ensure_many(must_edit, commit=base_sha)
-                cur = ledger.read().get("snapshots", {})
-                cur.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
-                ledger.update(snapshots=cur)
+                metas, missing = safe_snapshot_existing_files(
+                    snap, must_edit, base_sha,
+                    on_log=lambda m: ledger.append_decision(f"Fix: {m}", actor="Fix")
+                )
+                if metas:
+                    cur = ledger.read().get("snapshots", {})
+                    cur.update({
+                        p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]}
+                        for p, m in metas.items()
+                    })
+                    ledger.update(snapshots=cur)
+                if missing:
+                    to_create = set(ledger.read().get("files_to_create", []))
+                    to_create.update(missing)
+                    ledger.update(files_to_create=sorted(to_create))
             ledger.update(project_root=project_root)
             ledger.append_decision(f"Fix: set project_root='{project_root}', scope={len(must_edit)} files; primed snapshots @base", actor="Fix")
             ledger.set_status("fix_pending")
