@@ -24,10 +24,13 @@ concurrency:
 jobs:
   run-dev:
     if: |
-      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'bot:implement')) ||
-      (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'need-fix') || 
-       contains(github.event.pull_request.labels.*.name, 'ai-fix'))) ||
-      (github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'issues' && 
+       github.event.action == 'labeled' && 
+       github.event.label.name == 'bot:implement') ||
+      (github.event_name == 'pull_request' && 
+       github.event.action == 'labeled' && 
+       (github.event.label.name == 'need-fix' || github.event.label.name == 'ai-fix'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

@@ -1,10 +1,8 @@
 name: AI Progressor
 
 on:
-  pull_request_review:
-    types: [submitted]
   pull_request:
-    types: [labeled, closed]   # ← ascolta anche quando il Reviewer applica le label
+    types: [labeled]
   workflow_dispatch: {}
 
 concurrency:
@@ -16,12 +14,9 @@ jobs:
     # Esegui su APPROVED, su PR merged, su label 'ready-to-merge', o manuale.
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
-      (github.event_name == 'pull_request' &&
-       github.event.action == 'labeled' &&
-       github.event.label.name == 'ready-to-merge' &&
-       !contains(github.event.pull_request.labels.*.name, 'need-fix'))
+      (github.event_name == 'pull_request' && 
+       github.event.action == 'labeled' && 
+       github.event.label.name == 'ready-to-merge')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
