@@ -96,6 +96,55 @@ def _collect_all_paths_from_plan(plan: Dict) -> List[str]:
             seen.add(q); norm.append(q)
     return norm
 
+def _safe_snapshot_existing_files(
+    snap: SnapshotStore,
+    files: List[str],
+    commit: str,
+    ledger: ThreadLedger,
+    context: str
+) -> None:
+    """Create snapshots only for files that exist in the given commit."""
+    if not files:
+        return
+    existing, missing = [], []
+    for fp in files:
+        try:
+            r = subprocess.run(
+                ["git", "ls-tree", commit, "--", fp],
+                text=True, capture_output=True, check=True, cwd=snap.repo_root
+            )
+            (existing if r.stdout.strip() else missing).append(fp)
+        except subprocess.CalledProcessError:
+            missing.append(fp)
+    # snapshot solo per quelli esistenti
+    if existing:
+        metas = snap.ensure_many(existing, commit=commit)
+        cur = ledger.read().get("snapshots", {})
+        cur.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+        ledger.update(snapshots=cur)
+        ledger.append_decision(f"{context}: snapshotted {len(existing)}/{len(files)} existing files @{commit[:8]}", actor="Analyzer")
+    # registra i file da creare (opzionale, utile al Dev)
+    if missing:
+        to_create = set(ledger.read().get("files_to_create", []))
+        to_create.update(missing)
+        ledger.update(files_to_create=sorted(to_create))
+        ledger.append_decision(f"{context}: {len(missing)} files to be created (no snapshot)", actor="Analyzer")
+
+def _normalize_paths_under_root(paths: List[str], project_root: str) -> List[str]:
+    """Ensure each relative path is under project_root (prefix if missing)."""
+    out: List[str] = []
+    root = project_root.rstrip("/")
+    seen = set()
+    for p in paths:
+        q = str(p).strip().lstrip("./")
+        if not q:
+            continue
+        if not q.startswith(root + "/"):
+            q = f"{root}/{q}"
+        if q not in seen:
+            seen.add(q); out.append(q)
+    return out
+
 def setup_dependencies() -> Tuple[IssueAnalyzer, PlanGenerator, ReportBuilder, TaskCreator]:
     """Initialize and return all analyzer dependencies"""
     issue_analyzer = IssueAnalyzer()
@@ -183,16 +232,12 @@ def main() -> int:
             # Scope iniziale dai file citati nell'issue (se presenti)
             initial_files = issue_analysis.get("requirements", {}).get("files", [])
             if initial_files:
-                # normalizza path
-                must_edit = [str(p).strip().lstrip("./") for p in initial_files if str(p).strip()]
+                # normalizza sotto project_root
+                must_edit = _normalize_paths_under_root(initial_files, project_root)
                 ledger.set_scope(must_edit=must_edit, must_not_edit=[])
                 ledger.append_decision(f"Analyzer: initial scope from issue ({len(must_edit)} files)", actor="Analyzer")
-                
-                # → Priming snapshot per lo scope iniziale
-                metas = snap.ensure_many(must_edit, commit=base_sha)
-                # (opzionale) persistiamo solo metadati in ledger (no contenuti pesanti)
-                ledger.update(snapshots={p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
-                ledger.append_decision(f"Analyzer: primed {len(metas)} snapshots @base={base_sha}", actor="Analyzer")
+                # → Priming snapshot SAFE (solo file esistenti)
+                _safe_snapshot_existing_files(snap, must_edit, base_sha, ledger, "Initial scope")
                 
             # Stato
             ledger.set_status("dev_pending")
@@ -220,19 +265,14 @@ def main() -> int:
             # Aggiorna scope con i path dai task (unione con quelli iniziali)
             plan_paths = _collect_all_paths_from_plan(plan)
             if plan_paths:
+                plan_paths_norm = _normalize_paths_under_root(plan_paths, project_root)
                 current = ledger.read().get("scope", {}).get("must_edit", [])
-                merged = list({*current, *plan_paths})
+                merged = list({*current, *plan_paths_norm})
                 ledger.set_scope(must_edit=merged, must_not_edit=[])
-                ledger.append_decision(f"Analyzer: scope merged with plan paths (now {len(merged)} files)", actor="Analyzer")
+                ledger.append_decision(f"Analyzer: scope merged with plan paths (now {len(merged)} files)", actor="Analyzer")                
+                # → Priming snapshot SAFE (solo file esistenti)
+                _safe_snapshot_existing_files(snap, merged, base_sha, ledger, "Final scope")
                 
-                # → Priming snapshot per lo scope finale
-                metas = snap.ensure_many(merged, commit=base_sha)
-                # aggiorna/merge i metadati snapshot nel ledger
-                s = ledger.read().get("snapshots", {})
-                s.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
-                ledger.update(snapshots=s)
-                ledger.append_decision(f"Analyzer: primed final {len(metas)} snapshots @base={base_sha}", actor="Analyzer")
-
         except Exception as e:
             error_msg = f"Plan generation failed: {e}"
             print(error_msg)
