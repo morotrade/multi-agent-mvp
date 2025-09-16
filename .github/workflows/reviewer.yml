@@ -2,9 +2,7 @@
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, labeled, edited, ready_for_review]
-  pull_request_review:
-    types: [submitted]
+    types: [labeled]
   workflow_dispatch: {}
 
 concurrency:
@@ -13,6 +11,11 @@ concurrency:
 
 jobs:
   review:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && 
+       github.event.action == 'labeled' && 
+       github.event.label.name == 'need-review')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

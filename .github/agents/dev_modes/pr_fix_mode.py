@@ -233,6 +233,14 @@ class PRFixMode:
             ledger.update(dev_fix={"applied_commit": new_commit})
             ledger.set_status("ci_running")
             ledger.append_decision("Fix: patch applied and pushed; status→ci_running", actor="Fix")
+            
+            # === ALWAYS ADD 'need-rewiew' LABEL AFTER FIX PUSH ===
+            try:
+                from utils import add_labels
+                owner, repo = self.github.get_repo_info()
+                add_labels(owner, repo, pr_number, ["need-rewiew"])
+            except Exception as e:
+                print(f"⚠️ Label add failed on PR-fix: {e}")
     
             
             print(f"✅ PR #{pr_number} fixes applied successfully")
