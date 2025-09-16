@@ -12,12 +12,15 @@ Features:
 """
 import os
 import sys
-from typing import Tuple
+import subprocess
+from pathlib import Path
+from typing import Tuple, List, Dict
 
 # Import segmented modules
 from ana_core import IssueAnalyzer, PlanGenerator, ReportBuilder, TaskCreator
 from utils.system_info import validate_environment
 from utils.github_api import post_issue_comment, get_repo_info
+from state import ThreadLedger, SnapshotStore
 
 
 def get_issue_info_from_env() -> Tuple[int, str]:
@@ -68,6 +71,30 @@ def validate_analyzer_environment() -> Tuple[bool, str]:
     
     return True, "Environment validation passed"
 
+def _get_repo_root() -> Path:
+    """Resolve git repository root (fallback to current working dir)."""
+    try:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True, capture_output=True, check=True
+        ).stdout.strip()
+        return Path(root)
+    except Exception:
+        return Path.cwd()
+
+def _collect_all_paths_from_plan(plan: Dict) -> List[str]:
+    """Collect unique paths from plan tasks."""
+    paths: List[str] = []
+    for t in plan.get("tasks", []):
+        paths.extend(list(t.get("paths", [])))
+    # normalizza e dedup
+    norm = []
+    seen = set()
+    for p in paths:
+        q = str(p).strip().lstrip("./")
+        if q and q not in seen:
+            seen.add(q); norm.append(q)
+    return norm
 
 def setup_dependencies() -> Tuple[IssueAnalyzer, PlanGenerator, ReportBuilder, TaskCreator]:
     """Initialize and return all analyzer dependencies"""
@@ -111,6 +138,20 @@ def main() -> int:
         # Setup dependencies
         issue_analyzer, plan_generator, report_builder, task_creator = setup_dependencies()
         
+        # === STATE / LEDGER BOOTSTRAP ===
+        thread_id = f"ISSUE-{issue_number}"
+        repo_root = _get_repo_root()
+        ledger = ThreadLedger(thread_id)
+        # metadati base del thread
+        ledger.update(repo=f"{owner}/{repo}", status="triage")
+        # base SHA al momento dell'analisi (il branch nascerà più avanti nel flusso)
+        try:
+            base_sha = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+        except Exception:
+            base_sha = "HEAD"
+        ledger.update(base_sha=base_sha, branch=None)
+
+        
         # Ensure standard labels exist
         task_creator.ensure_standard_labels()
         
@@ -130,6 +171,32 @@ def main() -> int:
             issue_analysis = issue_analyzer.analyze_issue_comprehensive(issue_number)
             summary = issue_analyzer.get_analysis_summary(issue_analysis)
             print(f"Issue analysis complete: {summary}")
+            
+            # Proietta root progetto da project_tag (se presente)
+            project_tag = issue_analysis.get("project_tag")
+            project_root = f"projects/{project_tag}" if project_tag else "projects"
+            # Fotografa struttura progetto (profondità limitata)
+            snap = SnapshotStore(repo_root)
+            structure = snap.scan_tree(project_root, depth=3)
+            ledger.set_project(project_root, structure)
+            ledger.append_decision(f"Analyzer: set project_root='{project_root}' ({len(structure)} files @depth=3)", actor="Analyzer")
+            # Scope iniziale dai file citati nell'issue (se presenti)
+            initial_files = issue_analysis.get("requirements", {}).get("files", [])
+            if initial_files:
+                # normalizza path
+                must_edit = [str(p).strip().lstrip("./") for p in initial_files if str(p).strip()]
+                ledger.set_scope(must_edit=must_edit, must_not_edit=[])
+                ledger.append_decision(f"Analyzer: initial scope from issue ({len(must_edit)} files)", actor="Analyzer")
+                
+                # → Priming snapshot per lo scope iniziale
+                metas = snap.ensure_many(must_edit, commit=base_sha)
+                # (opzionale) persistiamo solo metadati in ledger (no contenuti pesanti)
+                ledger.update(snapshots={p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+                ledger.append_decision(f"Analyzer: primed {len(metas)} snapshots @base={base_sha}", actor="Analyzer")
+                
+            # Stato
+            ledger.set_status("dev_pending")
+            
         except Exception as e:
             error_msg = f"Issue analysis failed: {e}"
             print(error_msg)
@@ -149,7 +216,23 @@ def main() -> int:
             print(f"Plan generated: {len(plan['tasks'])} tasks, {len(plan['sprints'])} sprints")
             if dependency_analysis["has_dependencies"]:
                 print(f"Dependencies detected: {len(dependency_analysis['dependent_tasks'])} dependent tasks")
-            
+                
+            # Aggiorna scope con i path dai task (unione con quelli iniziali)
+            plan_paths = _collect_all_paths_from_plan(plan)
+            if plan_paths:
+                current = ledger.read().get("scope", {}).get("must_edit", [])
+                merged = list({*current, *plan_paths})
+                ledger.set_scope(must_edit=merged, must_not_edit=[])
+                ledger.append_decision(f"Analyzer: scope merged with plan paths (now {len(merged)} files)", actor="Analyzer")
+                
+                # → Priming snapshot per lo scope finale
+                metas = snap.ensure_many(merged, commit=base_sha)
+                # aggiorna/merge i metadati snapshot nel ledger
+                s = ledger.read().get("snapshots", {})
+                s.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+                ledger.update(snapshots=s)
+                ledger.append_decision(f"Analyzer: primed final {len(metas)} snapshots @base={base_sha}", actor="Analyzer")
+
         except Exception as e:
             error_msg = f"Plan generation failed: {e}"
             print(error_msg)
@@ -209,13 +292,13 @@ def main() -> int:
                 print(f"Successfully auto-started task #{created_tasks[0]}")
         
         # === FINAL SUMMARY ===
-        
         print("Phase 6: Final summary...")
         try:
             summary_message = task_creator.create_execution_summary(
                 created_tasks, failed_tasks, sprint_number, plan
             )
             post_status_update(issue_number, summary_message)
+            ledger.append_decision("Analyzer completed: report posted, tasks created", actor="Analyzer")
         except Exception as e:
             print(f"Summary posting failed (non-blocking): {e}")
         
@@ -225,6 +308,8 @@ def main() -> int:
         
         # Return success if we created at least one task
         if created_tasks:
+            # Lasciamo il thread pronto per il Dev agent
+            ledger.set_status("dev_pending")
             return 0
         else:
             print("No tasks were created - this may indicate a problem")

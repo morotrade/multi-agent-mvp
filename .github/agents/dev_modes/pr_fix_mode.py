@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 PR Fix mode: PR reviewer feedback → In-place fixes for AI Developer
+Con integrazione dello state: ThreadLedger/SnapshotStore/PromptBuilder/DiffRecorder.
 """
 import re
+import os
 import subprocess
 from typing import TYPE_CHECKING, List, Dict, Tuple
 from collections import Counter
@@ -15,6 +17,10 @@ from dev_core import (
     enforce_all,
     constraints_block, diff_format_block, files_list_block, findings_block, snapshots_block,
     collect_snapshots, comment_with_llm_preview, normalize_diff_headers_against_fs
+)
+from state import (
+    ThreadLedger, SnapshotStore, DiffRecorder,
+    preflight_git_apply_check, preflight_git_apply_threeway
 )
 
 if TYPE_CHECKING:
@@ -50,6 +56,17 @@ class PRFixMode:
                 print("❌ Cannot get PR head branch.")
                 return 1
             
+            owner, repo = self.github.get_repo_info()
+            base_sha = (pr_data.get("base", {}) or {}).get("sha") or "HEAD"
+            head_sha = (pr_data.get("head", {}) or {}).get("sha")
+
+            # === STATE / LEDGER BOOTSTRAP ===
+            thread_id = f"PR-{pr_number}"
+            ledger = ThreadLedger(thread_id)
+            ledger.update(repo=f"{owner}/{repo}", base_sha=base_sha, branch=branch)
+            ledger.append_decision(f"Fix: bootstrap repo={owner}/{repo} base={base_sha} head={head_sha}", actor="Fix")
+ 
+            
             # Carica feedback e file PR (servono per inferire la root)
             reviewer_findings = self._read_reviewer_sticky(pr_number)
             changed_files = self.github.get_pr_files(pr_number)
@@ -60,6 +77,32 @@ class PRFixMode:
             self.github.post_comment(pr_number, f"🔎 Using project root: `{project_root}` for PR-fix")
             print(f"📁 PROJECT_ROOT = {project_root}")
             ensure_dir(project_root)
+            
+            # Persist project root + scope nel ledger
+            must_edit = sorted({
+                (f.get("filename") or "").strip()
+                for f in changed_files
+                if (f.get("filename") or "").strip().startswith(project_root.rstrip("/") + "/")
+            })
+            ledger.update(reviewer={"sticky_findings": reviewer_findings or ""})
+            ledger.set_scope(must_edit=must_edit, must_not_edit=[])
+            # Priming snapshot meta @ base_sha (utile a prompt futuri/diagnostica)
+            try:
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
+            except Exception:
+                repo_root = Path.cwd()
+            snap = SnapshotStore(repo_root)
+            if must_edit:
+                metas = snap.ensure_many(must_edit, commit=base_sha)
+                cur = ledger.read().get("snapshots", {})
+                cur.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+                ledger.update(snapshots=cur)
+            ledger.update(project_root=project_root)
+            ledger.append_decision(f"Fix: set project_root='{project_root}', scope={len(must_edit)} files; primed snapshots @base", actor="Fix")
+            ledger.set_status("fix_pending")
 
             # Checkout PR branch PRIMA di generare il diff: così leggiamo i file reali
             self._checkout_pr_branch(branch)
@@ -75,6 +118,7 @@ class PRFixMode:
 
             # Genera + valida + applica con un retry locale (una sola volta) su errori formali
             retried = False
+            rec = DiffRecorder()  # per audit artefatti di questa run
             while True:
                 diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files, snapshots)
                 if not diff or not diff.strip():
@@ -85,14 +129,40 @@ class PRFixMode:
                     print("ℹ️ No-op: empty diff (PR-fix)")
                     return 0
                 try:
+                    # Log prompt/diff grezzo (per diagnosi)
+                    rec.save_metadata(agent="Fix", thread_id=thread_id, pr_number=pr_number)
+                    # Il prompt è costruito internamente da _build_pr_fix_prompt; registriamo il testo usato rigenerandolo qui
+                    repo_lang = get_repo_language()
+                    prompt_preview = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots)
+                    rec.record_prompt(prompt_preview)
+                    rec.record_model_raw(diff)
+
                     # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
                     diff = normalize_diff_headers_against_fs(diff, project_root)
                     # Enforce: tutto sotto project_root (eccezione README di progetto)
                     enforce_all(diff, project_root, allow_project_readme=True)
+
+                    # Preflight: usa la vera repo_root per coerenza con Git
+                    ok, out, err = preflight_git_apply_check(diff, repo_root)
+                    if not ok:
+                        ok, out, err = preflight_git_apply_threeway(diff, repo_root)
+                    rec.record_preflight(out, err)
+                    rec.record_payload(diff)
+                    # Persist esito preflight nel ledger
+                    ledger.update(dev_fix={
+                        "model": os.getenv("DEVELOPER_MODEL") or "gpt-5-thinking",
+                        "params": {"temperature": 0.2},  # se hai un valore reale, mettilo qui
+                        "last_prompt_hash": str(hash(prompt_preview)),
+                        "last_generated_patch": str(rec.dir / "payload_to_git.patch"),
+                        "preflight": {"ok": ok, "stderr": err}
+                    })
+                    if not ok:
+                        raise RuntimeError("Preflight failed; patch would not apply cleanly")
                     # Applica i fix
                     success = self._apply_fixes(diff)
                     if not success:
                         raise RuntimeError("git apply failed")
+                    
                     break
                 except Exception as e:
                     msg = str(e).lower()
@@ -112,10 +182,21 @@ class PRFixMode:
                         diff = self.diff_processor.process_full_cycle(prompt, project_root)
                         # Torna al loop per normalizzare/enforce/apply
                         continue
+                    # Log failure nel ledger e rilancia
+                    ledger.append_decision(f"Fix: generation/apply retry needed: {e}", actor="Fix")
                     raise
             
             # Commit and push fixes
             self._commit_and_push_fixes(pr_number, branch)
+            # Stato → CI
+            try:
+                new_commit = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+            except Exception:
+                new_commit = None
+            ledger.update(dev_fix={"applied_commit": new_commit})
+            ledger.set_status("ci_running")
+            ledger.append_decision("Fix: patch applied and pushed; status→ci_running", actor="Fix")
+    
             
             print(f"✅ PR #{pr_number} fixes applied successfully")
             return 0
