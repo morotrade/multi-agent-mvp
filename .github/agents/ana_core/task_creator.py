@@ -42,7 +42,7 @@ class TaskCreator:
             ("priority:medium", "ffc107", "Priority: medium"), 
             ("priority:high", "dc3545", "Priority: high"),
             ("bot:implement", "0e8a16", "Ready for AI developer implementation"),
-            ("need-rewiew", "d73a4a", "PR awaiting reviewer")
+            ("need-review", "d73a4a", "PR awaiting reviewer")  # Corretto: "review" e aggiunta virgola
         ]
         
         for name, color, description in standard_labels:
