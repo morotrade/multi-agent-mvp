@@ -42,8 +42,9 @@ class PromptBuilder:
             # elenco compatto, solo path, niente contenuti
             proj_struct_block = "# PROJECT STRUCTURE (paths)\n" + "\n".join(f"- {p}" for p in project_structure[:500])
 
+        files_section = "\n\n".join(files_blocks)
         prompt = f"""SYSTEM: Senior Python Developer. Output ONLY a valid unified diff. No explanations.
-
+        
 # CONTEXT
 PR: (thread) | base_sha: {base_sha} | branch: {branch}
 Summary: {one_line_summary}
@@ -80,7 +81,7 @@ MUST-NOT-EDIT:
 - No text outside the diff. No code fences. No markdown.
 
 # FILE SNAPSHOTS
-{'\n\n'.join(files_blocks)}
+{files_section}
 
 {proj_struct_block if project_structure else ""}
 
