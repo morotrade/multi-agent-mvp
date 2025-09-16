@@ -4,8 +4,7 @@ on:
   pull_request_review:
     types: [submitted]
   pull_request:
--   types: [closed]
-+   types: [labeled, closed]   # ← ascolta anche quando il Reviewer applica le label
+    types: [labeled, closed]   # ← ascolta anche quando il Reviewer applica le label
   workflow_dispatch: {}
 
 concurrency:
