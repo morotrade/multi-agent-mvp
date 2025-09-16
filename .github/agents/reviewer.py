@@ -21,7 +21,7 @@ from pathlib import Path
 from rew_core import ProjectDetector, LLMReviewer, CommentManager
 from rew_policies import LabelManager, PolicyEnforcer
 from utils.github_api import get_repo_info, get_pr, get_pr_files
-from state import ThreadLedger, SnapshotStore
+from state import ThreadLedger, SnapshotStore, safe_snapshot_existing_files
 
 def get_pr_number_from_env() -> int:
     """Get PR number from environment or GitHub event"""
@@ -139,20 +139,27 @@ def main() -> int:
         snap = SnapshotStore(repo_root)
         struct_paths = snap.scan_tree(project_root, depth=3)
         ledger.set_project(project_root, struct_paths)
+        
         # Scope: tutti i file del PR sotto project_root
         must_edit = sorted({ f.get("filename") for f in files_data if f.get("filename","").startswith(project_root.rstrip("/") + "/") })
         ledger.set_scope(must_edit=must_edit, must_not_edit=[])
         ledger.append_decision(f"Reviewer: set project_root='{project_root}', scope={len(must_edit)} files", actor="Reviewer")
-        # Priming snapshot @ base_sha per i file in scope (metadati nel ledger → utile al Fix)
+        
+        # Priming snapshot SAFE @ base_sha (solo file esistenti); i nuovi finiscono in files_to_create
         if must_edit:
-            metas = snap.ensure_many(must_edit, commit=base_sha)
-            snap_meta = {p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()}
-            # merge con eventuali snapshot esistenti
-            cur = ledger.read().get("snapshots", {})
-            cur.update(snap_meta)
-            ledger.update(snapshots=cur)
-            ledger.append_decision(f"Reviewer: primed {len(metas)} snapshots @base={base_sha}", actor="Reviewer")
-
+            metas, missing = safe_snapshot_existing_files(
+                snap, must_edit, base_sha,
+                on_log=lambda m: ledger.append_decision(f"Reviewer: {m}", actor="Reviewer")
+            )
+            if metas:
+                cur = ledger.read().get("snapshots", {})
+                cur.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+                ledger.update(snapshots=cur)
+            if missing:
+                to_create = set(ledger.read().get("files_to_create", []))
+                to_create.update(missing)
+                ledger.update(files_to_create=sorted(to_create))
+        
         # Run LLM review
         try:
             result = llm_reviewer.run_review(pr_data, files_data, project_root)
