@@ -156,11 +156,37 @@ class PRFixMode:
                     enforce_all(diff, project_root, allow_project_readme=True)
 
                     # Preflight: usa la vera repo_root per coerenza con Git
+                    
+                    print(f"=== DEBUG PREFLIGHT ===")
+                    print(f"Project root: {project_root}")
+                    print(f"Repo root: {repo_root}")
+                    print(f"Branch: {branch}")
+                    print(f"Must edit files: {must_edit}")
+                    print(f"Diff size: {len(diff)} chars")
+                    print(f"=== DIFF PREVIEW (first 1000 chars) ===")
+                    print(diff[:1000])
+                    print(f"=== END DIFF PREVIEW ===")
+                    
                     ok, out, err = preflight_git_apply_check(diff, repo_root)
+                    
+                    print(f"=== PREFLIGHT RESULT ===")
+                    print(f"OK: {ok}")
+                    print(f"STDOUT: {out}")
+                    print(f"STDERR: {err}")
+                    
                     if not ok:
+                        
+                        print(f"3WAY OK: {ok}")
+                        print(f"3WAY STDOUT: {out}")
+                        print(f"3WAY STDERR: {err}")
+                        
                         ok, out, err = preflight_git_apply_threeway(diff, repo_root)
+                        
+                    print(f"=== END PREFLIGHT DEBUG ===")
+
                     rec.record_preflight(out, err)
                     rec.record_payload(diff)
+                    
                     # Persist esito preflight nel ledger
                     ledger.update(dev_fix={
                         "model": os.getenv("DEVELOPER_MODEL") or "gpt-5-thinking",
@@ -169,8 +195,13 @@ class PRFixMode:
                         "last_generated_patch": str(rec.dir / "payload_to_git.patch"),
                         "preflight": {"ok": ok, "stderr": err}
                     })
+                    
                     if not ok:
-                        raise RuntimeError("Preflight failed; patch would not apply cleanly")
+                        print(f"=== FINAL PREFLIGHT FAILURE ===")
+                        print(f"Both normal and 3way preflight failed")
+                        print(f"Last error: {err}")
+                        raise RuntimeError(f"Preflight failed; patch would not apply cleanly. Error: {err}")
+                    
                     # Applica i fix
                     success = self._apply_fixes(diff)
                     if not success:
@@ -234,11 +265,11 @@ class PRFixMode:
             ledger.set_status("ci_running")
             ledger.append_decision("Fix: patch applied and pushed; status→ci_running", actor="Fix")
             
-            # === ALWAYS ADD 'need-rewiew' LABEL AFTER FIX PUSH ===
+            # === ALWAYS ADD 'need-review' LABEL AFTER FIX PUSH ===
             try:
                 from utils import add_labels
                 owner, repo = self.github.get_repo_info()
-                add_labels(owner, repo, pr_number, ["need-rewiew"])
+                add_labels(owner, repo, pr_number, ["need-review"])
             except Exception as e:
                 print(f"⚠️ Label add failed on PR-fix: {e}")
     
