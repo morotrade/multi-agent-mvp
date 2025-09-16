@@ -20,7 +20,8 @@ from dev_core import (
 )
 from state import (
     ThreadLedger, SnapshotStore, DiffRecorder,
-    preflight_git_apply_check, preflight_git_apply_threeway, safe_snapshot_existing_files
+    preflight_git_apply_check, preflight_git_apply_threeway,
+    safe_snapshot_existing_files, detect_changed_files, post_commit_snapshot_update
 )
 
 if TYPE_CHECKING:
@@ -200,11 +201,35 @@ class PRFixMode:
             
             # Commit and push fixes
             self._commit_and_push_fixes(pr_number, branch)
-            # Stato → CI
+
+            # === SNAPSHOT UPDATE AFTER COMMIT (centralizzato) ===
             try:
-                new_commit = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
             except Exception:
-                new_commit = None
+                repo_root = Path.cwd()
+
+            new_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                text=True, capture_output=True, check=True
+            ).stdout.strip()
+
+            changed_files = detect_changed_files(
+                repo_root=repo_root, commit_from="HEAD~1", commit_to="HEAD", diff_text=diff
+            )
+
+            post_commit_snapshot_update(
+                repo_root=repo_root,
+                ledger=ledger,
+                commit=new_commit,
+                changed_files=changed_files,
+                context="Fix",
+                actor="Fix",
+            )
+
+            # Stato → CI
             ledger.update(dev_fix={"applied_commit": new_commit})
             ledger.set_status("ci_running")
             ledger.append_decision("Fix: patch applied and pushed; status→ci_running", actor="Fix")

@@ -6,14 +6,18 @@ Issue mode: Issue → Branch → PR flow for AI Developer
 import os
 import subprocess
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional
+from pathlib import Path
 
 from utils import get_repo_language, slugify
 from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
 from dev_core import (
     enforce_all,
     constraints_block, diff_format_block, files_list_block, snapshots_block,
-    comment_with_llm_preview, normalize_diff_headers_against_fs, normalize_diff_headers_against_fs
+    comment_with_llm_preview, normalize_diff_headers_against_fs
 )
+
+from state import ThreadLedger
+from state import detect_changed_files, post_commit_snapshot_update
 
 if TYPE_CHECKING:
     from dev_core.github_client import GitHubClient
@@ -86,6 +90,37 @@ class IssueMode:
             
             # Commit and push
             self._commit_and_push(issue_number, branch)
+            
+            # === SNAPSHOT UPDATE AFTER COMMIT (centralizzato) ===
+            try:
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
+            except Exception:
+                repo_root = Path(os.getcwd())
+
+            new_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                text=True, capture_output=True, check=True
+            ).stdout.strip()
+
+            changed_files = detect_changed_files(
+                repo_root=repo_root, commit_from="HEAD~1", commit_to="HEAD", diff_text=None
+            )
+
+            ledger = ThreadLedger(f"ISSUE-{issue_number}")
+            ledger.update(project_root=project_root)
+            post_commit_snapshot_update(
+                repo_root=repo_root,
+                ledger=ledger,
+                commit=new_commit,
+                changed_files=changed_files,
+                context="Issue",
+                actor="Developer",
+            )
+            
+            
             
             # Create PR
             pr_number = self._create_pr(issue_number, issue_title, project_root, branch)
