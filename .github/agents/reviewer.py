@@ -17,8 +17,8 @@ import json
 from typing import Optional, List, Dict
 
 # Import segmented modules
-from .rew_core import ProjectDetector, LLMReviewer, CommentManager
-from .rew_policies import LabelManager, PolicyEnforcer
+from rew_core import ProjectDetector, LLMReviewer, CommentManager
+from rew_policies import LabelManager, PolicyEnforcer
 from .utils.github_api import get_repo_info, get_pr, get_pr_files
 from .state import thread_ledger
 
