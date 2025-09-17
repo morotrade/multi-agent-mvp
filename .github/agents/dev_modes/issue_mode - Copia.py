@@ -147,23 +147,6 @@ class IssueMode:
             # Create PR
             pr_number = self._create_pr(issue_number, issue_title, project_root, branch)
             
-            # 🔁 Handoff snapshot: copia anche nel ThreadLedger della PR,
-            # così Reviewer e PR-Fix troveranno gli snapshot aggiornati
-            try:
-                pr_ledger = ThreadLedger(f"PR-{pr_number}")
-                pr_ledger.update(project_root=project_root)
-                post_commit_snapshot_update(
-                    repo_root=repo_root,
-                    ledger=pr_ledger,
-                    commit=new_commit,
-                    changed_files=changed_files,
-                    context="Issue→PR handoff",
-                    actor="Developer",
-                )
-                pr_ledger.set_status("review_pending")
-            except Exception as e:
-                print(f"⚠️ Snapshot handoff to PR ledger failed: {e}")
-            
             # Add labels if possible
             self._add_labels_if_available(pr_number)
             

@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LLM reviewer integration - prompts, parsing, and review execution.
-Reviewer is read-only: it must NOT emit or handle diffs/patches.
-Outputs: counts, findings, prioritized_actions, summary.
+LLM reviewer integration - prompts, parsing, and review execution
 """
 import json
 import re
@@ -66,31 +64,21 @@ Analyze the changes and respond with ONLY a JSON object containing:
 
 ```json
 {{
-  "blockers": <int>,
-  "importants": <int>,
-  "suggestions": <int>,
+  "blockers": <number>,
+  "importants": <number>, 
+  "suggestions": <number>,
   "findings": [
     {{
       "level": "BLOCKER|IMPORTANT|SUGGESTION",
-      "file": "path/relative/to/project_root",
-      "line": <int or null>,
-      "problem": "Cosa non va (chiaro e verificabile)",
-      "why_it_matters": "Perché impatta qualità/bug/perf/sicurezza",
-      "proposal": "Come risolvere o aggirare (senza codice o con pseudocodice)"
+      "file": "path/to/file",
+      "line": <number or null>,
+      "message": "Description of the issue",
+      "suggestion": "How to fix it"
     }}
   ],
-  "prioritized_actions": [
-    {{
-      "id": "R-001",
-      "title": "Titolo breve dell'intervento",
-      "severity": "BLOCKER|IMPORTANT|SUGGESTION",
-      "effort": "S|M|L",
-      "rationale": "Sintesi del perché va fatto",
-      "dependencies": ["R-000?"],
-      "files_touched": ["path/...", "path/..."]
-    }}
-  ],
-  "summary": "Sintesi finale (breve)"
+  "summary": "Brief overall assessment",
+  "patch": "<optional unified diff strictly under {project_root}>",
+  "suggested_patches": ["<optional unified diff 1>", "<optional unified diff 2>"]
 }}
 ```
 
@@ -106,12 +94,12 @@ Focus on:
 - Code quality and maintainability
 - Best practices adherence
 
-### Guidelines for prioritized_actions:
-- Each action should have a unique ID (R-001, R-002, etc.)
-- Effort levels: S=Small (1-2h), M=Medium (4-8h), L=Large (1+ days)
-- Dependencies: Reference other action IDs if one must be done before another
-- Files_touched: List the specific files that would be modified by this action
-- Keep rationale concise but compelling
+### Patch Guidance (if any)
+- If you provide a `patch` or `suggested_patches`, use a proper unified diff:
+  * Use headers like `--- a/{project_root}/...` and `+++ b/{project_root}/...`
+  * Include at least one `@@ hunk @@`
+  * Ensure paths stay under `{project_root}`
+  * Keep patches minimal and focused on fixing findings
 
 """
         return prompt
@@ -120,8 +108,16 @@ Focus on:
         """
         Robust parsing of LLM response with fallback handling.
         Accepts JSON "naked" or inside ```json ... ``` fences.
-        NOTE: patches are not supported (read-only reviewer).
+        Normalizes patches by removing fence blocks.
         """
+        def strip_fences(s: str) -> str:
+            """Remove fenced code block markers from strings"""
+            text = s.strip()
+            # Remove opening fence
+            text = re.sub(r'^\s*```(?:diff|patch|json)?\s*', '', text)
+            # Remove closing fence  
+            text = re.sub(r'\s*```\s*$', '', text)
+            return text.strip()
         
         try:
             # Try to extract JSON from fenced block first
@@ -130,38 +126,32 @@ Focus on:
             
             data = json.loads(json_str)
             
-            # Normalize response structure (no patches)
+            # Normalize response structure
             result = {
                 "blockers": int(data.get("blockers", 0) or 0),
                 "importants": int(data.get("importants", 0) or 0),
                 "suggestions": int(data.get("suggestions", 0) or 0),
                 "findings": data.get("findings", []) or [],
                 "summary": str(data.get("summary", "No summary provided") or "No summary provided"),
-                "prioritized_actions": data.get("prioritized_actions", []) or []
+                "patches": []
             }
             
-            # Validate prioritized_actions structure
-            validated_actions = []
-            for action in result["prioritized_actions"]:
-                if isinstance(action, dict):
-                    validated_action = {
-                        "id": str(action.get("id", "")),
-                        "title": str(action.get("title", "")),
-                        "severity": str(action.get("severity", "SUGGESTION")).upper(),
-                        "effort": str(action.get("effort", "M")).upper(),
-                        "rationale": str(action.get("rationale", "")),
-                        "dependencies": action.get("dependencies", []) if isinstance(action.get("dependencies"), list) else [],
-                        "files_touched": action.get("files_touched", []) if isinstance(action.get("files_touched"), list) else []
-                    }
-                    # Validate severity
-                    if validated_action["severity"] not in ["BLOCKER", "IMPORTANT", "SUGGESTION"]:
-                        validated_action["severity"] = "SUGGESTION"
-                    # Validate effort
-                    if validated_action["effort"] not in ["S", "M", "L"]:
-                        validated_action["effort"] = "M"
-                    validated_actions.append(validated_action)
+            # Handle single patch
+            if isinstance(data.get("patch"), str) and data["patch"].strip():
+                result["patches"].append(strip_fences(data["patch"]))
             
-            result["prioritized_actions"] = validated_actions
+            # Handle multiple patches
+            if isinstance(data.get("suggested_patches"), list):
+                for patch in data["suggested_patches"]:
+                    if isinstance(patch, str) and patch.strip():
+                        result["patches"].append(strip_fences(patch))
+            
+            # Cap patch sizes to prevent oversized comments
+            capped_patches = []
+            for patch in result["patches"]:
+                # Reasonable limit to avoid GitHub comment limits
+                capped_patches.append(patch[:120000])
+            result["patches"] = capped_patches
             
             return result
             
@@ -181,12 +171,11 @@ Focus on:
                     "level": "IMPORTANT",
                     "file": "",
                     "line": None,
-                    "problem": "LLM response parsing failed",
-                    "why_it_matters": "Review automation is not working properly",
-                    "proposal": "Check LLM configuration and try manual review"
+                    "message": "LLM response parsing failed",
+                    "suggestion": "Check LLM configuration and try manual review"
                 }],
                 "summary": "Parsing error occurred. Raw response available for manual review.",
-                "prioritized_actions": []
+                "patches": []
             }
     
     def run_review(self, pr_data: Dict, files_data: List[Dict], project_root: str) -> Dict:
@@ -210,8 +199,7 @@ Focus on:
                 result = self.parse_llm_response(raw_response)
                 
                 print(f"LLM review completed: {result['blockers']} blockers, "
-                      f"{result['importants']} important, {result['suggestions']} suggestions, "
-                      f"{len(result.get('prioritized_actions', []))} prioritized actions")
+                      f"{result['importants']} important, {result['suggestions']} suggestions")
                 
                 return result
                 
@@ -236,20 +224,32 @@ Focus on:
                 "level": "IMPORTANT",
                 "file": "",
                 "line": None,
-                "problem": f"AI review failed: {error_msg[:100]}",
-                "why_it_matters": "Automated review system is not functioning",
-                "proposal": "Manual review recommended due to AI reviewer failure"
+                "message": f"AI review failed: {error_msg[:100]}",
+                "suggestion": "Manual review recommended due to AI reviewer failure"
             }],
-            "prioritized_actions": [{
-                "id": "FALLBACK-001",
-                "title": "Manual review required",
-                "severity": "IMPORTANT",
-                "effort": "M",
-                "rationale": "AI reviewer failed, human review needed",
-                "dependencies": [],
-                "files_touched": []
-            }],
+            "patches": [],
             "summary": "Automated review unavailable - manual review required"
         }
     
-    # Note: patch filtering removed (read-only)
+    def filter_patches_under_root(self, patches: List[str], project_root: str) -> List[str]:
+        """
+        Filter patches to only include those modifying files under project_root.
+        Uses simple criteria: must contain header +++ b/<root>/... or --- a/<root>/...
+        """
+        if not patches:
+            return []
+        
+        root_prefix = project_root.rstrip("/") + "/"
+        valid_patches = []
+        
+        for diff in patches:
+            # Check for file headers under project root
+            has_valid_header = (
+                re.search(rf"^\+\+\+ b/{re.escape(root_prefix)}", diff, flags=re.M) or
+                re.search(rf"^--- a/{re.escape(root_prefix)}", diff, flags=re.M)
+            )
+            
+            if has_valid_header:
+                valid_patches.append(diff)
+        
+        return valid_patches

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PR Fix mode: usa analisi reviewer + snapshot dal ThreadLedger per generare il prompt.
-Priorità: leggere dal ledger; fallback: sticky comment & filesystem.
+PR Fix mode: PR reviewer feedback → In-place fixes for AI Developer
+Con integrazione dello state: ThreadLedger/SnapshotStore/PromptBuilder/DiffRecorder.
 """
 import re
 import os
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, List, Dict, Tuple
 from collections import Counter
 from pathlib import Path
 
-from utils import get_repo_language, get_preferred_model
+from utils import get_repo_language
 from dev_core.path_isolation import compute_project_root_for_pr, ensure_dir
 from dev_core import (
     enforce_all,
@@ -20,9 +20,9 @@ from dev_core import (
     coerce_unified_diff
 )
 from state import (
-    ThreadLedger, DiffRecorder,
+    ThreadLedger, SnapshotStore, DiffRecorder,
     preflight_git_apply_check, preflight_git_apply_threeway,
-    detect_changed_files, post_commit_snapshot_update
+    safe_snapshot_existing_files, detect_changed_files, post_commit_snapshot_update
 )
 
 if TYPE_CHECKING:
@@ -69,10 +69,8 @@ class PRFixMode:
             ledger.append_decision(f"Fix: bootstrap repo={owner}/{repo} base={base_sha} head={head_sha}", actor="Fix")
  
             
-            # === FEEDBACK REVIEWER: preferisci il LEDGER, fallback sticky comment ===
-            reviewer_findings, prioritized_actions = self._load_reviewer_from_ledger(pr_number)
-            if not reviewer_findings:
-                reviewer_findings = self._read_reviewer_sticky(pr_number)
+            # Carica feedback e file PR (servono per inferire la root)
+            reviewer_findings = self._read_reviewer_sticky(pr_number)
             changed_files = self.github.get_pr_files(pr_number)
 
             # Setup project root (env/body)  inferenza dai file se fallback pr-<n>
@@ -82,15 +80,42 @@ class PRFixMode:
             print(f"📁 PROJECT_ROOT = {project_root}")
             ensure_dir(project_root)
             
-            # Persist project root + scope nel ledger (senza creare snapshot qui)
+            # Persist project root + scope nel ledger
             must_edit = sorted({
                 (f.get("filename") or "").strip()
                 for f in changed_files
                 if (f.get("filename") or "").strip().startswith(project_root.rstrip("/") + "/")
             })
+            ledger.update(reviewer={"sticky_findings": reviewer_findings or ""})
             ledger.set_scope(must_edit=must_edit, must_not_edit=[])
+            # Priming snapshot meta @ base_sha (utile a prompt futuri/diagnostica)
+            try:
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
+            except Exception:
+                repo_root = Path.cwd()
+            
+            snap = SnapshotStore(repo_root)
+            if must_edit:
+                metas, missing = safe_snapshot_existing_files(
+                    snap, must_edit, base_sha,
+                    on_log=lambda m: ledger.append_decision(f"Fix: {m}", actor="Fix")
+                )
+                if metas:
+                    cur = ledger.read().get("snapshots", {})
+                    cur.update({
+                        p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]}
+                        for p, m in metas.items()
+                    })
+                    ledger.update(snapshots=cur)
+                if missing:
+                    to_create = set(ledger.read().get("files_to_create", []))
+                    to_create.update(missing)
+                    ledger.update(files_to_create=sorted(to_create))
             ledger.update(project_root=project_root)
-            ledger.append_decision(f"Fix: set project_root='{project_root}', scope={len(must_edit)} files", actor="Fix")
+            ledger.append_decision(f"Fix: set project_root='{project_root}', scope={len(must_edit)} files; primed snapshots @base", actor="Fix")
             ledger.set_status("fix_pending")
 
             # Checkout PR branch PRIMA di generare il diff: così leggiamo i file reali
@@ -98,35 +123,27 @@ class PRFixMode:
             
             # Config git per auto-fix whitespace nel repo corrente (preflight/apply)
             try:
-                repo_root = Path(subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    text=True, capture_output=True, check=True
-                ).stdout.strip())
                 subprocess.run(
                     ["git", "config", "--local", "apply.whitespace", "fix"],
                     check=True, cwd=str(repo_root)
                 )
             except Exception as _:
-                repo_root = Path.cwd()
+                pass
 
-            # Raccogli SNAPSHOT: prima dal LEDGER (content_path), poi fallback a filesystem
+            # Raccogli snapshot condivisi dei file PR sotto project_root
             paths = [(f.get("filename", "") or "").strip() for f in changed_files[:MAX_SNAPSHOT_FILES]]
-            snapshots = self._snapshots_from_ledger(pr_number, paths, SNAPSHOT_CHAR_LIMIT)
-            if not snapshots:
-                snapshots = collect_snapshots(
-                    project_root,
-                    paths=paths,
-                    max_files=MAX_SNAPSHOT_FILES,
-                    char_limit=SNAPSHOT_CHAR_LIMIT
-                )
+            snapshots = collect_snapshots(
+                project_root,
+                paths=paths,
+                max_files=MAX_SNAPSHOT_FILES,
+                char_limit=SNAPSHOT_CHAR_LIMIT
+            )
 
             # Genera + valida + applica con un retry locale (una sola volta) su errori formali
             retried = False
             rec = DiffRecorder()  # per audit artefatti di questa run
             while True:
-                # Arricchisci i finding con le Prioritized Actions dal ledger (se presenti)
-                enriched_findings = self._merge_findings_with_actions(reviewer_findings, prioritized_actions)
-                diff = self._generate_fix_diff(project_root, pr_data, enriched_findings, changed_files, snapshots)
+                diff = self._generate_fix_diff(project_root, pr_data, reviewer_findings, changed_files, snapshots)
                 if not diff or not diff.strip():
                     self.github.post_comment(
                         pr_number,
@@ -139,7 +156,7 @@ class PRFixMode:
                     rec.save_metadata(agent="Fix", thread_id=thread_id, pr_number=pr_number)
                     # Il prompt è costruito internamente da _build_pr_fix_prompt; registriamo il testo usato rigenerandolo qui
                     repo_lang = get_repo_language()
-                    prompt_preview = self._build_pr_fix_prompt(project_root, pr_data, enriched_findings, changed_files, repo_lang, snapshots)
+                    prompt_preview = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots)
                     rec.record_prompt(prompt_preview)
                     rec.record_model_raw(diff)
 
@@ -182,9 +199,8 @@ class PRFixMode:
                     rec.record_payload(diff)
                     
                     # Persist esito preflight nel ledger
-                    model_name = os.getenv("DEVELOPER_MODEL") or get_preferred_model("developer") or "gpt-4o-mini"
                     ledger.update(dev_fix={
-                        "model": model_name,
+                        "model": os.getenv("DEVELOPER_MODEL") or "gpt-5-thinking",
                         "params": {"temperature": 0.2},  # se hai un valore reale, mettilo qui
                         "last_prompt_hash": str(hash(prompt_preview)),
                         "last_generated_patch": str(rec.dir / "payload_to_git.patch"),
@@ -208,6 +224,7 @@ class PRFixMode:
                     
                     # stampa riga incriminata, se presente nel messaggio di git
                     try:
+                        import re
                         m = re.search(r"line\s+(\d+)", msg)
                         if m:
                             bad = int(m.group(1))
@@ -232,10 +249,9 @@ class PRFixMode:
                         target_path = ""
                         try:
                             # prendi il primo file sotto project_root dai changed_files del PR
-                            for item in changed_files:
-                                fp = (item.get("filename") or "").strip()
-                                if fp.startswith(f"{project_root}/"):
-                                    target_path = fp
+                            for p in changed_files:
+                                if p.startswith(f"{project_root}/"):
+                                    target_path = p
                                     break
                             if target_path:
                                 with open(target_path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -244,7 +260,7 @@ class PRFixMode:
                             curr_content = ""
 
                         prompt = self._build_pr_fix_prompt(
-                            project_root, pr_data, enriched_findings, changed_files, repo_lang, snapshots
+                            project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots
                         )
                         prompt += (
                             "\n\n# RETRY INSTRUCTIONS (STRICT FULL-FILE)\n"
@@ -268,6 +284,14 @@ class PRFixMode:
             self._commit_and_push_fixes(pr_number, branch)
 
             # === SNAPSHOT UPDATE AFTER COMMIT (centralizzato) ===
+            try:
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
+            except Exception:
+                repo_root = Path.cwd()
+
             new_commit = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 text=True, capture_output=True, check=True
@@ -382,6 +406,8 @@ class PRFixMode:
         )
         return prompt
     
+    # (rimosso) _collect_snapshots — usiamo dev_core.snapshots.collect_snapshots
+    
     def _generate_fix_diff(self, project_root: str, pr_data: Dict, reviewer_findings: str, changed_files: List[Dict], snapshots: List[Tuple[str, str]]) -> str:
         """Generate diff to fix PR issues"""
         repo_lang = get_repo_language()
@@ -409,61 +435,3 @@ class PRFixMode:
         self.git.commit(f"fix(pr #{pr_number}): address reviewer feedback")
         self.git.push_to_existing("origin", branch)
         print("✅ Pushed fixes to the same PR branch")
-
-    # -------- Helpers: ledger-first data sources --------
-    def _load_reviewer_from_ledger(self, pr_number: int) -> Tuple[str, List[Dict]]:
-        """Legge sticky_findings + prioritized_actions dal ThreadLedger (fallback vuoto)."""
-        try:
-            ledger = ThreadLedger(f"PR-{pr_number}")
-            data = ledger.read().get("reviewer", {}) or {}
-            findings = (data.get("sticky_findings") or "").strip()
-            actions = data.get("prioritized_actions") or []
-            return findings, actions
-        except Exception:
-            return "", []
-
-    def _merge_findings_with_actions(self, findings_text: str, actions: List[Dict]) -> str:
-        """Appende un elenco sintetico delle azioni prioritarie al testo dei findings."""
-        if not actions:
-            return findings_text or ""
-        lines = []
-        for a in actions[:20]:
-            title = a.get("title") or a.get("id") or ""
-            sev = (a.get("severity") or "").upper()
-            eff = a.get("effort") or ""
-            rationale = a.get("rationale") or a.get("why", "")
-            files = ", ".join(a.get("files_touched", []) or []) or "—"
-            badge = f"[{sev}/{eff}]" if sev or eff else ""
-            lines.append(f"- {badge} {title} — {rationale} (files: {files})")
-        block = "# Prioritized Actions (from reviewer)\n" + "\n".join(lines) + "\n"
-        return (findings_text or "") + "\n\n" + block
-
-    def _snapshots_from_ledger(self, pr_number: int, paths: List[str], char_limit: int) -> List[Tuple[str, str]]:
-        """Carica i contenuti snapshot dal ledger (content_path) rispettando i limiti di prompt."""
-        try:
-            ledger = ThreadLedger(f"PR-{pr_number}")
-            snaps = ledger.read().get("snapshots", {}) or {}
-            out: List[Tuple[str, str]] = []
-            for rel in (paths or [])[:MAX_SNAPSHOT_FILES]:
-                meta = snaps.get(rel) or {}
-                cp = meta.get("content_path")
-                if not cp:
-                    continue
-                p = Path(cp)
-                if not p.exists() or not p.is_file():
-                    continue
-                try:
-                    txt = p.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    continue
-                if len(txt) > char_limit:
-                    cut = txt.rfind("\n", 0, char_limit)
-                    if cut == -1:
-                        cut = char_limit
-                    txt = txt[:cut].rstrip("\n") + "\n# . (truncated) .\n"
-                # evita collisioni con fence markdown nel prompt
-                txt = txt.replace("```", "``\u200b`")
-                out.append((rel, txt))
-            return out
-        except Exception:
-            return []

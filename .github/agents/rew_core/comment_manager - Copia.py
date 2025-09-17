@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sticky comment management for AI Reviewer (read-only, no diffs).
+Sticky comment management for AI Reviewer
 """
 import time
 from typing import Dict, List, Optional
@@ -36,17 +36,12 @@ class CommentManager:
             line_info = f":{finding['line']}" if finding.get("line") else ""
             location = f"`{file_info}{line_info}`" if file_info else "General"
             
-            # Supporta sia lo schema nuovo (problem/proposal/why_it_matters)
-            # sia quello legacy (message/suggestion)
-            problem   = finding.get("problem")   or finding.get("message")   or "No message"
-            proposal  = finding.get("proposal")  or finding.get("suggestion") or ""
-            rationale = finding.get("why_it_matters") or ""
-
-            item = f"**{location}**: {problem}"
-            if rationale:
-                item += f"\n  *Why*: {rationale}"
-            if proposal:
-                item += f"\n  *Proposal*: {proposal}"
+            message = finding.get("message", "No message")
+            suggestion = finding.get("suggestion", "")
+            
+            item = f"**{location}**: {message}"
+            if suggestion:
+                item += f"\n  *Suggestion*: {suggestion}"
             
             sections[level].append(item)
         
@@ -63,32 +58,14 @@ class CommentManager:
         
         return "\n".join(markdown_parts)
     
-    def format_prioritized_actions_markdown(self, actions: List[Dict]) -> str:
-        """Format prioritized actions as markdown list"""
-        if not actions:
-            return "_Nessuna azione prioritaria proposta._"
-        lines: List[str] = []
-        for a in actions:
-            aid = a.get("id", "")
-            title = a.get("title", "")
-            sev = a.get("severity", "?")
-            eff = a.get("effort", "?")
-            rationale = a.get("rationale", "")
-            deps = ", ".join(a.get("dependencies", []) or []) or "–"
-            files = ", ".join(a.get("files_touched", []) or []) or "–"
-            lines.append(
-                f"- **{aid}** [{sev}/{eff}] **{title}** – {rationale}\n"
-                f"  - deps: {deps}\n"
-                f"  - files: {files}"
-            )
-        return "\n".join(lines)
-    
     def create_sticky_comment_body(self, 
                                    pr_number: int,
                                    result: Dict, 
                                    project_root: str,
+                                   filtered_patches: List[str],
+                                   total_patches: int,
                                    timestamp: Optional[str] = None) -> str:
-        """Create complete sticky comment body with findings and prioritized actions (no diffs)"""
+        """Create complete sticky comment body with all sections"""
         
         tag = self.get_sticky_tag(pr_number)
         timestamp = timestamp or time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -96,8 +73,7 @@ class CommentManager:
         blockers = result["blockers"]
         importants = result["importants"]
         suggestions = result["suggestions"]
-        findings_md = self.format_findings_markdown(result.get("findings", []))
-        plan_md = self.format_prioritized_actions_markdown(result.get("prioritized_actions", []))
+        findings_md = self.format_findings_markdown(result["findings"])
         summary = result["summary"]
         
         # Header section
@@ -125,13 +101,30 @@ class CommentManager:
 {findings_md}
 """
         
-        # Prioritized actions section
-        prioritized_section = ""
-        if result.get("prioritized_actions"):
-            prioritized_section = f"""
-#### 🎯 Prioritized Actions
-{plan_md}
-"""
+        # Patches section (optional)
+        patches_section = ""
+        if filtered_patches:
+            patch_chunks = []
+            for i, diff in enumerate(filtered_patches[:3], start=1):  # Max 3 patches displayed
+                # Truncate very long patches
+                snippet = diff[:120000]
+                patch_chunks.append(f"**Patch {i}**\n\n```diff\n{snippet}\n```")
+            
+            patches_md = "\n\n".join(patch_chunks)
+            patch_count_note = f" (showing {len(patch_chunks)}/{total_patches})" if total_patches > 3 else ""
+            
+            patches_section = f"""
+
+#### 🔧 Suggested Patches{patch_count_note}
+The following unified diffs stay under the project root and can be applied by the developer:
+
+{patches_md}"""
+        elif total_patches > 0:
+            # Had patches but all were filtered out
+            patches_section = f"""
+
+#### 🔧 Suggested Patches
+{total_patches} patches were suggested but filtered out (outside project root `{project_root}`)."""
         
         # Footer section
         footer = """
@@ -143,7 +136,7 @@ class CommentManager:
 <!-- reviewer:sticky:end -->"""
         
         # Combine all sections
-        full_body = header + findings_section + prioritized_section + footer
+        full_body = header + findings_section + patches_section + footer
         
         # Ensure we don't exceed GitHub's comment size limits
         if len(full_body) > 65000:
@@ -188,13 +181,17 @@ class CommentManager:
     def create_and_post_sticky_comment(self,
                                        pr_number: int,
                                        result: Dict,
-                                       project_root: str) -> None:
-        """Create and post/update sticky comment with review results (no diffs)"""
+                                       project_root: str,
+                                       filtered_patches: List[str],
+                                       total_patches: int) -> None:
+        """Create and post/update sticky comment with review results"""
         
         body = self.create_sticky_comment_body(
             pr_number=pr_number,
             result=result,
-            project_root=project_root
+            project_root=project_root,
+            filtered_patches=filtered_patches,
+            total_patches=total_patches
         )
         
         self.upsert_sticky_comment(pr_number, body)

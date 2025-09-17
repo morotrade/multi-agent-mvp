@@ -38,7 +38,7 @@ _DEFAULT_DOC: Dict[str, Any] = {
     "base_sha": None,
     "branch": None,
     "scope": {"must_edit": [], "must_not_edit": []},
-    "reviewer": {"sticky_findings": "", "suggested_patch": None},
+    "reviewer": {"sticky_findings": "", "prioritized_actions": [], "severity": "info", "suggested_patch": None},
     "dev_fix": {
         "model": None,
         "params": {},

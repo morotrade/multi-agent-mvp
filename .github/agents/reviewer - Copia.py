@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI Code Reviewer – Segmented architecture (PR-centric review with project scoping)
+AI Code Reviewer — Segmented architecture (PR-centric review with project scoping)
 
 Features:
 - Real LLM integration with robust parsing + fallbacks
 - Sticky comment management with structured sections
 - Policy enforcement (strict/lenient/essential-only) after side effects
 - Project root scoping with auto-detection + enforcement
-- Prioritized actions for systematic review follow-up
-- Read-only analysis (no diff generation)
+- Suggested patches filtered to project scope
 """
 import os
 import sys
 import json
 from typing import Optional, List, Dict
+import subprocess
+from pathlib import Path
 
 # Import segmented modules
-from project_detector import ProjectDetector
-from llm_reviewer import LLMReviewer
-from comment_manager import CommentManager
-from label_manager import LabelManager
-from policy_enforcer import PolicyEnforcer
+from rew_core import ProjectDetector, LLMReviewer, CommentManager
+from rew_policies import LabelManager, PolicyEnforcer
 from utils.github_api import get_repo_info, get_pr, get_pr_files
-from thread_ledger import ThreadLedger
+from state import ThreadLedger, SnapshotStore, safe_snapshot_existing_files
 
 def get_pr_number_from_env() -> int:
     """Get PR number from environment or GitHub event"""
@@ -133,15 +131,34 @@ def main() -> int:
         if not scope_valid:
             print(f"⚠️ Path scope violation: {len(scope_offenders)} files outside root")
         
-        # Read-only: non scansionare/aggiornare snapshot qui
-        ledger.set_project(project_root, [])
+        # Persisti struttura progetto (vista paths) e scope nel ledger
+        try:
+            repo_root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], text=True, capture_output=True, check=True).stdout.strip())
+        except Exception:
+            repo_root = Path.cwd()
+        snap = SnapshotStore(repo_root)
+        struct_paths = snap.scan_tree(project_root, depth=3)
+        ledger.set_project(project_root, struct_paths)
         
         # Scope: tutti i file del PR sotto project_root
         must_edit = sorted({ f.get("filename") for f in files_data if f.get("filename","").startswith(project_root.rstrip("/") + "/") })
         ledger.set_scope(must_edit=must_edit, must_not_edit=[])
         ledger.append_decision(f"Reviewer: set project_root='{project_root}', scope={len(must_edit)} files", actor="Reviewer")
         
-        # Vietato creare/aggiornare snapshot: Analyzer crea il primo snapshot, Dev li aggiorna dopo i commit
+        # Priming snapshot SAFE @ base_sha (solo file esistenti); i nuovi finiscono in files_to_create
+        if must_edit:
+            metas, missing = safe_snapshot_existing_files(
+                snap, must_edit, base_sha,
+                on_log=lambda m: ledger.append_decision(f"Reviewer: {m}", actor="Reviewer")
+            )
+            if metas:
+                cur = ledger.read().get("snapshots", {})
+                cur.update({p: {"sha": m["sha"], "lines": m["lines"], "content_path": m["content_path"]} for p, m in metas.items()})
+                ledger.update(snapshots=cur)
+            if missing:
+                to_create = set(ledger.read().get("files_to_create", []))
+                to_create.update(missing)
+                ledger.update(files_to_create=sorted(to_create))
         
         # Run LLM review
         try:
@@ -167,7 +184,12 @@ def main() -> int:
                 result["blockers"] = max(result["blockers"], 1)
                 print("🔒 ENFORCE_PROJECT_ROOT: Path scope violation treated as BLOCKER")
         
-        # Read-only: no patch handling
+        # Filter patches to project root
+        raw_patches = result.get("patches", [])
+        filtered_patches = llm_reviewer.filter_patches_under_root(raw_patches, project_root)
+        
+        if raw_patches and not filtered_patches:
+            print(f"⚠️ All {len(raw_patches)} suggested patches were outside project root - filtered out")
         
         # Determine policy and enforcement
         policy_name = label_manager.detect_policy_from_labels(pr_labels)
@@ -178,8 +200,6 @@ def main() -> int:
         )
         
         print(f"🎯 Review results: {result['blockers']} blockers, {result['importants']} important, {result['suggestions']} suggestions")
-        if result.get("prioritized_actions"):
-            print(f"📋 Prioritized actions: {len(result['prioritized_actions'])} actions")
         print(f"📋 Policy: {policy_name}, Must fix: {must_fix}")
         
         # === SIDE EFFECTS (before exit code calculation) ===
@@ -188,23 +208,17 @@ def main() -> int:
         comment_manager.create_and_post_sticky_comment(
             pr_number=pr_number,
             result=result,
-            project_root=project_root
+            project_root=project_root,
+            filtered_patches=filtered_patches,
+            total_patches=len(raw_patches)
         )
         
         # 1.b Persist reviewer findings (testo sintetico) nel ledger e stato → fix_pending
         findings_text = result.get("summary") or "Review completed."
         severity = "blocker" if result.get("blockers", 0) > 0 else ("important" if result.get("importants", 0) > 0 else "info")
-        
-        # Store prioritized actions in ledger as well
-        prioritized_actions = result.get("prioritized_actions", [])
-        ledger.update(reviewer={
-            "sticky_findings": findings_text, 
-            "suggested_patch": None, 
-            "severity": severity,
-            "prioritized_actions": prioritized_actions
-        })
+        ledger.update(reviewer={"sticky_findings": findings_text, "suggested_patch": None, "severity": severity})
         ledger.set_status("fix_pending")
-        ledger.append_decision(f"Reviewer: findings saved (severity={severity}, {len(prioritized_actions)} actions); status→fix_pending", actor="Reviewer")
+        ledger.append_decision(f"Reviewer: findings saved (severity={severity}); status→fix_pending", actor="Reviewer")
         
         # 2. Apply labels based on policy decision  
         label_manager.apply_review_labels(pr_number, must_fix)
