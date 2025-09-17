@@ -17,13 +17,10 @@ import json
 from typing import Optional, List, Dict
 
 # Import segmented modules
-from project_detector import ProjectDetector
-from llm_reviewer import LLMReviewer
-from comment_manager import CommentManager
-from label_manager import LabelManager
-from policy_enforcer import PolicyEnforcer
-from utils.github_api import get_repo_info, get_pr, get_pr_files
-from thread_ledger import ThreadLedger
+from .rew_core import ProjectDetector, LLMReviewer, CommentManager
+from .rew_policies import LabelManager, PolicyEnforcer
+from .utils.github_api import get_repo_info, get_pr, get_pr_files
+from .state import thread_ledger
 
 def get_pr_number_from_env() -> int:
     """Get PR number from environment or GitHub event"""
