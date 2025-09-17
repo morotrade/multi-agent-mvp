@@ -120,6 +120,15 @@ class PRFixMode:
 
             # Checkout PR branch PRIMA di generare il diff: così leggiamo i file reali
             self._checkout_pr_branch(branch)
+            
+            # Config git per auto-fix whitespace nel repo corrente (preflight/apply)
+            try:
+                subprocess.run(
+                    ["git", "config", "--local", "apply.whitespace", "fix"],
+                    check=True, cwd=str(repo_root)
+                )
+            except Exception as _:
+                pass
 
             # Raccogli snapshot condivisi dei file PR sotto project_root
             paths = [(f.get("filename", "") or "").strip() for f in changed_files[:MAX_SNAPSHOT_FILES]]

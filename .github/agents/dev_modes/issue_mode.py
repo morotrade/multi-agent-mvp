@@ -86,7 +86,26 @@ class IssueMode:
             
             # Create branch and implement
             branch = self._create_implementation_branch(issue_number, issue_title)
+           
+            # Configura git per auto-fix dei whitespace prima dell'apply
+            try:
+                repo_root = Path(subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    text=True, capture_output=True, check=True
+                ).stdout.strip())
+            except Exception:
+                repo_root = Path(os.getcwd())
+            # Evita errori 'trailing whitespace' nei patch
+            try:
+                subprocess.run(
+                    ["git", "config", "--local", "apply.whitespace", "fix"],
+                    check=True, cwd=str(repo_root)
+                )
+            except Exception as _:
+                pass
+
             success = self._apply_implementation(diff)
+            
             if not success:
                 self.github.post_comment(issue_number, "❌ Failed to apply implementation diff. Please check logs.")
                 return 1

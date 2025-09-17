@@ -72,10 +72,19 @@ def coerce_unified_diff(diff: str) -> str:
             out.append(line)
             continue
         if in_hunk:
-            if line and not (line.startswith("+") or line.startswith("-") or line.startswith(" ") or line.startswith("\\")):
-                out.append(" " + line)
-            else:
+        
+            # non toccare la riga speciale terminante con '\ No newline at end of file'
+            if line.startswith("\\"):
                 out.append(line)
+                continue
+            # se manca prefisso, aggiungi contesto
+            if line and not (line.startswith("+") or line.startswith("-") or line.startswith(" ")):
+                line = " " + line
+            # trim trailing whitespace nelle righe hunk (+/-/spazio)
+            if line and (line[0] in "+- "):
+                line = line.rstrip(" \t")
+            out.append(line)
+        
         else:
             out.append(line)
     coerced = "\n".join(out)
