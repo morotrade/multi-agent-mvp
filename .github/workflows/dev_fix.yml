@@ -1,0 +1,5 @@
+﻿- name: Debug current file snapshot
+  if: failure() || always()
+  run: |
+    echo "=== HEAD:projects/math_utils.py (first 60 lines) ==="
+    git --no-pager show HEAD:projects/math_utils.py | nl -ba | sed -n '1,60p'

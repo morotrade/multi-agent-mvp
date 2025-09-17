@@ -170,7 +170,7 @@ class PRFixMode:
 
                     # Preflight: usa la vera repo_root per coerenza con Git
                     
-                    print(f"=== DEBUG PREFLIGHT ===")
+                    print(f"\n=== DEBUG PREFLIGHT ===")
                     print(f"Project root: {project_root}")
                     print(f"Repo root: {repo_root}")
                     print(f"Branch: {branch}")
@@ -178,24 +178,22 @@ class PRFixMode:
                     print(f"Diff size: {len(diff)} chars")
                     print(f"=== DIFF PREVIEW (first 1000 chars) ===")
                     print(diff[:1000])
-                    print(f"=== END DIFF PREVIEW ===")
+                    print(f"=== END DIFF PREVIEW ===\n")
                     
                     ok, out, err = preflight_git_apply_check(diff, repo_root)
                     
-                    print(f"=== PREFLIGHT RESULT ===")
+                    print(f"\n=== PREFLIGHT RESULT ===")
                     print(f"OK: {ok}")
                     print(f"STDOUT: {out}")
                     print(f"STDERR: {err}")
                     
                     if not ok:
-                        
+                        ok, out, err = preflight_git_apply_threeway(diff, repo_root)
                         print(f"3WAY OK: {ok}")
                         print(f"3WAY STDOUT: {out}")
                         print(f"3WAY STDERR: {err}")
                         
-                        ok, out, err = preflight_git_apply_threeway(diff, repo_root)
-                        
-                    print(f"=== END PREFLIGHT DEBUG ===")
+                    print(f"=== END PREFLIGHT DEBUG ===\n")
 
                     rec.record_preflight(out, err)
                     rec.record_payload(diff)
@@ -223,22 +221,57 @@ class PRFixMode:
                     break
                 except Exception as e:
                     msg = str(e).lower()
+                    
+                    # stampa riga incriminata, se presente nel messaggio di git
+                    try:
+                        import re
+                        m = re.search(r"line\s+(\d+)", msg)
+                        if m:
+                            bad = int(m.group(1))
+                            lines = diff.splitlines()
+                            start = max(0, bad - 4)
+                            end = min(len(lines), bad + 3)
+                            print("=== PATCH CONTEXT AROUND ERROR ===")
+                            for i in range(start, end):
+                                # mostra numero di riga 1-based + contenuto
+                                print(f"{i+1:04d} | {lines[i]!r}")
+                            print("=== END PATCH CONTEXT ===")
+                    except Exception:
+                        pass
+
                     retriable = any(k in msg for k in ("missing unified hunk", "malformed patch", "corrupt patch", "git apply failed"))
                     if retriable and not retried:
                         retried = True
-                        # Istruzioni esplicite per obbligare unified hunks validi o full-file diff
-                        repo_lang = get_repo_language()
-                        prompt = self._build_pr_fix_prompt(project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots)
-                        prompt += (
-                            "\n\n# RETRY INSTRUCTIONS\n"
-                            "- Your previous patch failed (invalid or missing '@@' hunks / apply failed).\n"
-                            "- Regenerate ONE fenced unified diff.\n"
-                            "- Include proper '@@' sections; if unsure, emit FULL-FILE unified diffs for files you modify.\n"
-                        )
-                        # Rigenera con prompt rinforzato
-                        diff = self.diff_processor.process_full_cycle(prompt, project_root)
                         
-                        # Coercizza anche il diff rigenerato
+                        # STRICT FULL-FILE RETRY: usa contenuto ATTUALE come base e vieta rinomini
+                        repo_lang = get_repo_language()
+                        curr_content = ""
+                        target_path = ""
+                        try:
+                            # prendi il primo file sotto project_root dai changed_files del PR
+                            for p in changed_files:
+                                if p.startswith(f"{project_root}/"):
+                                    target_path = p
+                                    break
+                            if target_path:
+                                with open(target_path, "r", encoding="utf-8", errors="ignore") as fh:
+                                    curr_content = fh.read()
+                        except Exception:
+                            curr_content = ""
+
+                        prompt = self._build_pr_fix_prompt(
+                            project_root, pr_data, reviewer_findings, changed_files, repo_lang, snapshots
+                        )
+                        prompt += (
+                            "\n\n# RETRY INSTRUCTIONS (STRICT FULL-FILE)\n"
+                            "- Your previous patch failed (corrupt/misaligned hunk). DO NOT emit partial hunks.\n"
+                            "- Emit ONE fenced unified diff with a FULL-FILE replacement for EACH modified file.\n"
+                            "- Use headers exactly as: '--- a/<path>' and '+++ b/<same path>'.\n"
+                            "- The final file must be complete and runnable; DO NOT rename existing identifiers unless explicitly requested.\n"
+                            f"- Base yourself on CURRENT content of {target_path} below and apply the requested changes:\n"
+                            f"\n<CURRENT {target_path}>\n{curr_content}\n</CURRENT>\n"
+                        )
+                        diff = self.diff_processor.process_full_cycle(prompt, project_root)
                         diff = coerce_unified_diff(diff)
                         
                         # Torna al loop per normalizzare/enforce/apply

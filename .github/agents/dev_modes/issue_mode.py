@@ -243,6 +243,6 @@ class IssueMode:
         try:
             from utils import add_labels
             owner, repo = self.github.get_repo_info()
-            add_labels(owner, repo, pr_number, ["type:feature", "bot:generated", "need-rewiew"])
+            add_labels(owner, repo, pr_number, ["type:feature", "bot:generated", "need-review"])
         except Exception as e:
             print(f"⚠️ Label add failed: {e}")
