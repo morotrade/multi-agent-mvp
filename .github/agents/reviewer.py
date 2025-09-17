@@ -15,15 +15,28 @@ import os
 import sys
 import json
 from typing import Optional, List, Dict
+from pathlib import Path
 
-# Import segmented modules
+# --- Robust import path bootstrap (works from .github/agents and repo root) ---
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent.parent  # from .github/agents → repo root
+for p in (str(_HERE), str(_REPO_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+# Import segmented modules (local)
 from project_detector import ProjectDetector
 from llm_reviewer import LLMReviewer
 from comment_manager import CommentManager
 from label_manager import LabelManager
 from policy_enforcer import PolicyEnforcer
 from utils.github_api import get_repo_info, get_pr, get_pr_files
-from thread_ledger import ThreadLedger
+try:
+    # preferred: package state re-exports ThreadLedger
+    from state import ThreadLedger
+except Exception:
+    # fallback: flat module
+    from thread_ledger import ThreadLedger
 
 def get_pr_number_from_env() -> int:
     """Get PR number from environment or GitHub event"""
