@@ -48,3 +48,37 @@ def normalize_diff_headers_against_fs(diff: str, project_root: str) -> str:
 
     parts.append(diff[last_end:])
     return "".join(parts)
+
+def coerce_unified_diff(diff: str) -> str:
+    """
+    Best-effort coercion per unified diff generati dal modello:
+    - normalizza CRLF→LF
+    - garantisce newline finale
+    - dentro gli hunk (@@ ... @@) prefissa con ' ' le righe senza '+', '-', ' ', '\\'
+    """
+    if not isinstance(diff, str) or not diff:
+        return diff
+    s = diff.replace("\r\n", "\n")
+    lines = s.split("\n")
+    out: list[str] = []
+    in_hunk = False
+    for line in lines:
+        if line.startswith("@@ "):
+            in_hunk = True
+            out.append(line)
+            continue
+        if line.startswith("diff --git ") or line.startswith("--- ") or line.startswith("+++ "):
+            in_hunk = False
+            out.append(line)
+            continue
+        if in_hunk:
+            if line and not (line.startswith("+") or line.startswith("-") or line.startswith(" ") or line.startswith("\\")):
+                out.append(" " + line)
+            else:
+                out.append(line)
+        else:
+            out.append(line)
+    coerced = "\n".join(out)
+    if not coerced.endswith("\n"):
+        coerced += "\n"
+    return coerced

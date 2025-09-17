@@ -16,7 +16,8 @@ from dev_core.path_isolation import compute_project_root_for_pr, ensure_dir
 from dev_core import (
     enforce_all,
     constraints_block, diff_format_block, files_list_block, findings_block, snapshots_block,
-    collect_snapshots, comment_with_llm_preview, normalize_diff_headers_against_fs
+    collect_snapshots, comment_with_llm_preview, normalize_diff_headers_against_fs,
+    coerce_unified_diff
 )
 from state import (
     ThreadLedger, SnapshotStore, DiffRecorder,
@@ -150,6 +151,9 @@ class PRFixMode:
                     rec.record_prompt(prompt_preview)
                     rec.record_model_raw(diff)
 
+                    # Harden: coercizza il diff per evitare "corrupt patch"
+                    diff = coerce_unified_diff(diff)
+                    
                     # Normalizza header (nuovi file/eliminazioni) rispetto al filesystem
                     diff = normalize_diff_headers_against_fs(diff, project_root)
                     # Enforce: tutto sotto project_root (eccezione README di progetto)
@@ -224,6 +228,10 @@ class PRFixMode:
                         )
                         # Rigenera con prompt rinforzato
                         diff = self.diff_processor.process_full_cycle(prompt, project_root)
+                        
+                        # Coercizza anche il diff rigenerato
+                        diff = coerce_unified_diff(diff)
+                        
                         # Torna al loop per normalizzare/enforce/apply
                         continue
                     # Log failure nel ledger e rilancia

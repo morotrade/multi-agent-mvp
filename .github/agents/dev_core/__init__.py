@@ -1,3 +1,4 @@
+
 """
 Core modules for AI Developer
 """
@@ -16,7 +17,7 @@ from .prompt_blocks import (
 )
 from .snapshots import collect_snapshots
 from .errors import comment_with_llm_preview
-from .diff_helpers import normalize_diff_headers_against_fs
+from .diff_helpers import normalize_diff_headers_against_fs, coerce_unified_diff
 
 __all__ = [
     'GitOperations',
@@ -32,4 +33,5 @@ __all__ = [
     "comment_with_llm_preview",
     "comment_with_llm_preview",
     "normalize_diff_headers_against_fs",
+    "coerce_unified_diff"
 ]
