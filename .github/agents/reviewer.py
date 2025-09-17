@@ -20,7 +20,7 @@ from typing import Optional, List, Dict
 from rew_core import ProjectDetector, LLMReviewer, CommentManager
 from rew_policies import LabelManager, PolicyEnforcer
 from utils.github_api import get_repo_info, get_pr, get_pr_files
-from state import thread_ledger
+from state import ThreadLedger
 
 def get_pr_number_from_env() -> int:
     """Get PR number from environment or GitHub event"""
