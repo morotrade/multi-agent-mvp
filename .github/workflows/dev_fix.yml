@@ -49,6 +49,7 @@ jobs:
           GH_CLASSIC_TOKEN: ${{ secrets.GH_CLASSIC_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          REFACE_STRATEGY: full
         run: |
           echo "🔧 PR Fix for #${PR_NUMBER}"
           python .github/agents/dev.py --mode fix --pr ${PR_NUMBER}

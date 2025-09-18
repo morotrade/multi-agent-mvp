@@ -69,6 +69,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DEVELOPER_MODEL: gpt-4o-mini
+          REFACE_STRATEGY: full
           PROJECT_ROOT: ${{ vars.DEV_PROJECT_ROOT }}
           # Imposta automaticamente in base all'evento:
           ISSUE_NUMBER: ${{ github.event_name == 'issues' && github.event.issue.number || (inputs.mode == 'issue' && inputs.number || '') }}

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, List, Dict, Tuple
 from collections import Counter
 from pathlib import Path
 
-from utils import get_repo_language, get_preferred_model
+from utils import get_repo_language, get_preferred_model, FullFileRefacer
 from dev_core.path_isolation import compute_project_root_for_pr, ensure_dir
 from dev_core import (
     enforce_all,
@@ -42,6 +42,9 @@ class PRFixMode:
         self.github = github_client
         self.git = git_ops
         self.diff_processor = diff_processor
+        # Feature flag per abilitare il full refacing come fallback robusto
+        self._use_reface = os.getenv("REFACE_STRATEGY", "").lower() == "full"
+        self._refacer = FullFileRefacer() if self._use_reface else None
     
     def run(self, pr_number: int) -> int:
         """
@@ -195,6 +198,35 @@ class PRFixMode:
                         print(f"=== FINAL PREFLIGHT FAILURE ===")
                         print(f"Both normal and 3way preflight failed")
                         print(f"Last error: {err}")
+                        # 🔁 Fallback: prova il full refacing su un file target se abilitato
+                        if self._refacer:
+                            target_path = ""
+                            for fp in must_edit:
+                                if fp.startswith(project_root.rstrip("/") + "/"):
+                                    target_path = fp
+                                    break
+                            if target_path:
+                                print(f"🧠 Refacing fallback on {target_path}")
+                                # Costruisci un ‘requirements’ semplice dal reviewer_findings + actions
+                                req = "Address reviewer feedback and make the file pass syntax/format checks."
+                                if reviewer_findings:
+                                    req += f"\n\nReviewer Findings:\n{reviewer_findings}"
+                                if prioritized_actions:
+                                    actions_txt = "\n".join(f"- {a.get('title') or a.get('id')}" for a in prioritized_actions[:10])
+                                    req += f"\n\nPrioritized Actions:\n{actions_txt}"
+                                rf_ok = self._refacer.reface_file(
+                                    file_path=target_path,
+                                    requirements=req,
+                                    review_history=[reviewer_findings or ""],
+                                    style_guide="Follow project conventions"
+                                )
+                                if rf_ok:
+                                    print("✅ Refacing fallback succeeded; skipping patch apply.")
+                                    # Traccia nel ledger che si è passati al refacing
+                                    ledger.append_decision(f"Fix: preflight failed → refacing applied on {target_path}", actor="Fix")
+                                    diff = ""  # non usiamo più il diff, andiamo al commit/push
+                                    break
+                        # Se non c’è refacer o ha fallito, alza errore come prima
                         raise RuntimeError(f"Preflight failed; patch would not apply cleanly. Error: {err}")
                     
                     # Applica i fix
@@ -242,6 +274,23 @@ class PRFixMode:
                                     curr_content = fh.read()
                         except Exception:
                             curr_content = ""
+
+                        # 🔁 Prima del retry testuale, se abilitato prova il refacing diretto sul file target
+                        if self._refacer and target_path:
+                            print(f"🧠 Trying refacing before STRICT FULL-FILE diff retry on {target_path}")
+                            req = "Apply the requested fixes reliably by rewriting the complete file."
+                            if reviewer_findings:
+                                req += f"\n\nReviewer Findings:\n{reviewer_findings}"
+                            rf_ok = self._refacer.reface_file(
+                                file_path=target_path,
+                                requirements=req,
+                                review_history=[reviewer_findings or ""],
+                                style_guide="Follow project conventions"
+                            )
+                            if rf_ok:
+                                print("✅ Refacing succeeded; skipping STRICT FULL-FILE diff retry.")
+                                diff = ""  # salta il retry patch: andiamo al commit/push
+                                break
 
                         prompt = self._build_pr_fix_prompt(
                             project_root, pr_data, enriched_findings, changed_files, repo_lang, snapshots
@@ -402,14 +451,20 @@ class PRFixMode:
         """Apply fix diff to working directory"""
         self.git.ensure_clean_worktree()
         return self.diff_processor.apply_diff(diff)
-    
+        
     def _commit_and_push_fixes(self, pr_number: int, branch: str) -> None:
-        """Commit fixes and push to existing PR branch"""
+        """Commit fixes (only if there are changes) and push to existing PR branch."""
         self.git.add_all()
-        self.git.commit(f"fix(pr #{pr_number}): address reviewer feedback")
-        self.git.push_to_existing("origin", branch)
-        print("✅ Pushed fixes to the same PR branch")
-
+        # Se non ci sono cambi staged, evita di fallire il commit e spingi lo stato corrente
+        try:
+            # Prova a committare; GitOperations può alzare se no changes
+            self.git.commit(f"fix(pr #{pr_number}): address reviewer feedback")
+        except subprocess.CalledProcessError as e:
+            print(f"ℹ️ No new changes to commit (possibly refacing already committed): {e}")
+        finally:
+            self.git.push_to_existing("origin", branch)
+            print("✅ Pushed fixes to the same PR branch")    
+    
     # -------- Helpers: ledger-first data sources --------
     def _load_reviewer_from_ledger(self, pr_number: int) -> Tuple[str, List[Dict]]:
         """Legge sticky_findings + prioritized_actions dal ThreadLedger (fallback vuoto)."""

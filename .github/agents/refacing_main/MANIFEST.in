@@ -1,0 +1,44 @@
+# Include package metadata
+include LICENSE
+include README.md
+include pyproject.toml
+include Makefile
+include MANIFEST.in
+
+# Include documentation
+recursive-include reface_engine *.md
+recursive-include reface_engine *.rst
+recursive-include docs *
+
+# Include configuration files
+include *.toml
+include *.cfg
+include *.ini
+
+# Include test data
+recursive-include reface_engine/tests *.py
+recursive-include reface_engine/tests/data *
+
+# Include type stubs
+recursive-include reface_engine *.pyi
+include reface_engine/py.typed
+
+# Exclude development and build artifacts
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.pyd
+global-exclude __pycache__
+global-exclude .git*
+global-exclude .DS_Store
+global-exclude *.so
+global-exclude .coverage
+global-exclude htmlcov
+
+# Exclude specific directories
+prune build
+prune dist
+prune .git
+prune .pytest_cache
+prune .mypy_cache
+prune .ruff_cache
+prune node_modules

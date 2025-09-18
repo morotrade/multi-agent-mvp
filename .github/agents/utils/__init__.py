@@ -9,7 +9,7 @@ from .diff_processing import (
 
 from .file_validation import (
     get_whitelist_patterns, get_denylist_patterns, paths_from_unified_diff,
-    is_path_allowed, is_path_denied, validate_diff_files
+    is_path_allowed, is_path_denied, validate_diff_files, is_path_safe
 )
 
 from .github_api import (
@@ -37,6 +37,8 @@ from .system_info import (
     validate_environment, get_system_info
 )
 
+from .reface_engine import FullFileRefacer, EnhancedPRFixMode
+
 # Re-export everything
 __all__ = [
     # Diff processing
@@ -44,7 +46,7 @@ __all__ = [
     
     # File validation
     'get_whitelist_patterns', 'get_denylist_patterns', 'paths_from_unified_diff',
-    'is_path_allowed', 'is_path_denied', 'validate_diff_files',
+    'is_path_allowed', 'is_path_denied', 'validate_diff_files', 'is_path_safe'
     
     # GitHub API
     'get_github_headers', 'get_github_graphql_headers',
@@ -65,5 +67,8 @@ __all__ = [
     'get_preferred_model',
     
     # System info
-    'validate_environment', 'get_system_info'
+    'validate_environment', 'get_system_info',
+    
+    # Reface Engine
+    'FullFileRefacer', 'EnhancedPRFixMode',
 ]

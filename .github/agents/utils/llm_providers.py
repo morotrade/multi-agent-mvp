@@ -20,7 +20,7 @@ def call_openai_api(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 4
         from openai import OpenAI
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            return "❌ OPENAI_API_KEY not configured"
+            raise RuntimeError("OPENAI_API_KEY not configured")
         
         client = OpenAI(api_key=api_key, timeout=TIMEOUT_LLM)
         resp = client.chat.completions.create(
@@ -38,7 +38,7 @@ def call_anthropic_api(prompt: str, model: str = "claude-3-5-sonnet-latest", max
         import anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
-            return "❌ ANTHROPIC_API_KEY not configured"
+            return RuntimeError("OPENAI_API_KEY not configured")
         
         client = anthropic.Anthropic(api_key=api_key)  # Remove timeout from constructor
         resp = client.messages.create(
@@ -57,7 +57,7 @@ def call_gemini_api(prompt: str, model: str = "gemini-1.5-pro", max_tokens: int 
         import google.generativeai as genai
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            return "❌ GEMINI_API_KEY not configured"
+            raise RuntimeError("OPENAI_API_KEY not configured")
         
         genai.configure(api_key=api_key)
         m = genai.GenerativeModel(model)

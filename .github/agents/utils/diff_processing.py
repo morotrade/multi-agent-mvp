@@ -64,7 +64,7 @@ def extract_single_diff(markdown_text: str) -> str:
         # Remove non-ASCII characters that could cause issues
         cleaned_line = line.encode("ascii", "ignore").decode("ascii")
         cleaned_lines.append(cleaned_line)
-    diff = "\n".join(cleaned_lines)
+    diff = "\n".join(lines)  # mantieni UTF-8
 
     # Enhanced validation (vale anche per diff combinati)
     if not re.search(r"^--- (?:a/|/dev/null)", diff, flags=re.M):

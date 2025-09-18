@@ -8,7 +8,7 @@ import subprocess
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional
 from pathlib import Path
 
-from utils import get_repo_language, slugify
+from utils import get_repo_language, slugify, FullFileRefacer
 from dev_core.path_isolation import compute_project_root_for_issue, ensure_dir
 from dev_core import (
     enforce_all,
@@ -32,6 +32,9 @@ class IssueMode:
         self.github = github_client
         self.git = git_ops
         self.diff_processor = diff_processor
+        # Fallback di refacing opzionale
+        self._use_reface = os.getenv("REFACE_STRATEGY", "").lower() == "full"
+        self._refacer = FullFileRefacer() if self._use_reface else None
     
     def run(self, issue_number: int) -> int:
         """
@@ -105,11 +108,30 @@ class IssueMode:
                 pass
 
             success = self._apply_implementation(diff)
-            
+          
             if not success:
-                self.github.post_comment(issue_number, "❌ Failed to apply implementation diff. Please check logs.")
-                return 1
-            
+                # 🔁 Fallback: prova refacing su un file inferito dal diff (prima intestazione '+++ b/<path>')
+                if self._refacer:
+                    import re
+                    m = re.search(r"^\+\+\+\s+b/(.+)$", diff, re.MULTILINE)
+                    target_rel = m.group(1).strip() if m else ""
+                    if target_rel:
+                        # Usa sempre il project_root per evitare path resolution errata
+                        target_abs = str(Path(project_root) / target_rel)
+                        print(f"🧠 Refacing fallback on {target_abs}")
+                        req = f"Implement the issue requirements in the complete file. Title: {issue_title}"
+                        rf_ok = self._refacer.reface_file(
+                            file_path=target_abs,
+                            requirements=req,
+                            review_history=[issue_body or ""],
+                            style_guide="Follow project conventions"
+                        )
+                        if rf_ok:
+                            success = True
+                if not success:
+                    self.github.post_comment(issue_number, "❌ Failed to apply implementation diff. Please check logs.")
+                    return 1
+
             # Commit and push
             self._commit_and_push(issue_number, branch)
             
@@ -233,11 +255,17 @@ class IssueMode:
         return self.diff_processor.apply_diff(diff)
     
     def _commit_and_push(self, issue_number: int, branch: str) -> None:
-        """Commit changes and push branch"""
+        """Commit changes (only if needed) and push branch."""
         self.git.add_all()
-        self.git.commit(f"feat(issue #{issue_number}): implement from issue")
-        self.git.push_with_upstream("origin", branch)
-    
+        try:
+            self.git.commit(f"feat(issue #{issue_number}): implement from issue")
+        except subprocess.CalledProcessError as e:
+            # Nessun cambiamento da committare (probabile commit già fatto dal refacer)
+            print(f"ℹ️ No new changes to commit: {e}")
+        finally:
+            self.git.push_with_upstream("origin", branch)
+            print("✅ Pushed branch (with or without new commit)")
+        
     def _create_pr(self, issue_number: int, issue_title: str, project_root: str, branch: str) -> int:
         """Create pull request for implementation"""
         pr_title = f"[Bot] Implement from issue #{issue_number}: {issue_title}"
